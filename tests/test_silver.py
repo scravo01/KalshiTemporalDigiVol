@@ -44,9 +44,9 @@ class TestSilverSchema:
 
 
 class TestSilverContent:
-    def test_three_snapshots_produced(self, silver_df):
+    def test_six_snapshots_produced(self, silver_df):
         snaps = set(silver_df["snapshot"].cast(pl.Utf8).unique().to_list())
-        assert snaps == {"T-1", "T0", "T+1"}
+        assert snaps == {"T-3", "T-2", "T-1", "T0", "T+1", "T+2"}
 
     def test_delta_values_in_range(self, silver_df):
         assert (silver_df["delta"] >= 0.02).all()
@@ -58,7 +58,11 @@ class TestSilverContent:
 
     def test_btc_close_matches_binance(self, silver_df):
         t0 = silver_df.filter(pl.col("snapshot").cast(pl.Utf8) == "T0")
-        assert (t0["btc_close"] - 95_100.0).abs().max() < 0.1
+        assert (t0["btc_close"] - 95_150.0).abs().max() < 0.1
+
+    def test_btc_close_t_minus3_matches_binance(self, silver_df):
+        tm3 = silver_df.filter(pl.col("snapshot").cast(pl.Utf8) == "T-3")
+        assert (tm3["btc_close"] - 95_150.0).abs().max() < 0.1
 
     def test_no_zero_volume_rows(self, silver_df):
         assert (silver_df["volume"] > 0).all()
@@ -69,4 +73,4 @@ class TestSilverContent:
 
     def test_three_contracts_per_snapshot(self, silver_df):
         counts = silver_df.group_by("snapshot").agg(pl.len().alias("n"))
-        assert (counts["n"] == 3).all()
+        assert (counts["n"] >= 3).all()

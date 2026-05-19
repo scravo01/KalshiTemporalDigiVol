@@ -16,7 +16,7 @@ STATS_PATH = GOLD_DIR / "summary_stats.csv"
 
 IV_MIN = 0.20
 IV_MAX = 5.00
-_SNAPSHOT_ORDER = ["T-1", "T0", "T+1"]
+_SNAPSHOT_ORDER = ["T-3", "T-2", "T-1", "T0", "T+1", "T+2"]
 
 
 def run() -> None:
@@ -98,23 +98,22 @@ def _compute_stats(features_df: pl.DataFrame) -> pl.DataFrame:
     results = []
 
     for feature in ("atm_iv", "skew_25d"):
-        wide = (
-            features_df.pivot(index="trade_date", on="snapshot", values=feature)
-            .drop_nulls()
-        )
-        if len(wide) < 5:
-            logger.warning(f"Only {len(wide)} complete days for {feature} — skipping stats")
-            continue
+        wide = features_df.pivot(index="trade_date", on="snapshot", values=feature)
+        present = [s for s in _SNAPSHOT_ORDER if s in wide.columns]
 
-        t_minus1 = wide["T-1"].to_numpy()
-        t0 = wide["T0"].to_numpy()
-        t_plus1 = wide["T+1"].to_numpy()
-
-        for delta_arr, shift_label in [
-            (t0 - t_minus1, "T0-T-1"),
-            (t_plus1 - t0, "T+1-T0"),
-        ]:
-            results.append(_run_tests(delta_arr, feature, shift_label))
+        consecutive_pairs = [
+            (a, b) for a, b in zip(present, present[1:])
+        ]
+        for a, b in consecutive_pairs:
+            # Use only dates where both snapshots are non-null
+            pair = wide.select(["trade_date", a, b]).drop_nulls()
+            if len(pair) < 5:
+                logger.warning(
+                    f"Only {len(pair)} days for {feature} {b}-{a} — skipping"
+                )
+                continue
+            delta = (pair[b] - pair[a]).to_numpy()
+            results.append(_run_tests(delta, feature, f"{b}-{a}"))
 
     return pl.DataFrame(results)
 
@@ -156,7 +155,7 @@ def _save_plots(features_df: pl.DataFrame) -> None:
         ("atm_iv", "ATM Implied Vol at Three Snapshots", "ATM IV (annualised)"),
         ("skew_25d", "25Δ Skew at Three Snapshots", "Skew (IV+25Δ − IV−25Δ) / ATM IV"),
     ]:
-        fig, ax = plt.subplots(figsize=(8, 5))
+        fig, ax = plt.subplots(figsize=(11, 5))
         sns.boxplot(data=data, x="snapshot", y=col, order=_SNAPSHOT_ORDER, ax=ax)
         ax.set_title(title)
         ax.set_xlabel("Snapshot")

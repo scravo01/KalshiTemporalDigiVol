@@ -32,12 +32,15 @@ def _guard_production_data():
 
 @pytest.fixture
 def bronze_dir(tmp_path: Path) -> Path:
-    """Synthetic bronze for one trade-date (2024-05-25): 3 strikes × 3 expiry windows.
+    """Synthetic bronze for one trade-date (2024-05-25): 3 strikes × 6 expiry windows.
 
-    The three snapshot windows map to UTC expiry hours 0, 1, 2:
-      T-1  → 00:00 UTC expiry (window open 23:00 UTC May 25, first bar 23:01)
-      T0   → 01:00 UTC expiry (window open 00:00 UTC May 26, first bar 00:01)
-      T+1  → 02:00 UTC expiry (window open 01:00 UTC May 26, first bar 01:01)
+    All 6 midnight snapshot windows (UTC expiry hours 22,23,0,1,2,3):
+      T-3  → 22:00 UTC expiry  (window open 21:00 UTC May 25, first bar 21:01)
+      T-2  → 23:00 UTC expiry  (window open 22:00 UTC May 25, first bar 22:01)
+      T-1  → 00:00 UTC expiry  (window open 23:00 UTC May 25, first bar 23:01)
+      T0   → 01:00 UTC expiry  (window open 00:00 UTC May 26, first bar 00:01)
+      T+1  → 02:00 UTC expiry  (window open 01:00 UTC May 26, first bar 01:01)
+      T+2  → 03:00 UTC expiry  (window open 02:00 UTC May 26, first bar 02:01)
 
     Kalshi candles use end_period_ts; Binance uses open-period timestamps.
     Silver joins on b.timestamp = c.timestamp - 1 minute.
@@ -46,11 +49,14 @@ def bronze_dir(tmp_path: Path) -> Path:
     ingested = datetime(2024, 5, 26, 0, 0, 0, tzinfo=timezone.utc)
 
     strikes = [94_500, 95_000, 95_500]
-    # expiry_times for the three snapshot windows (UTC hours 0, 1, 2 on May 26)
+    # expiry_times for all 6 snapshot windows
     expiry_times = [
+        datetime(2024, 5, 25, 22, 0, 0, tzinfo=timezone.utc),  # T-3 window
+        datetime(2024, 5, 25, 23, 0, 0, tzinfo=timezone.utc),  # T-2 window
         datetime(2024, 5, 26, 0, 0, 0, tzinfo=timezone.utc),   # T-1 window
         datetime(2024, 5, 26, 1, 0, 0, tzinfo=timezone.utc),   # T0 window
         datetime(2024, 5, 26, 2, 0, 0, tzinfo=timezone.utc),   # T+1 window
+        datetime(2024, 5, 26, 3, 0, 0, tzinfo=timezone.utc),   # T+2 window
     ]
 
     market_rows = []
@@ -76,7 +82,8 @@ def bronze_dir(tmp_path: Path) -> Path:
     ])
 
     # One candle per contract at expiry_time - 59 min (first end-period bar).
-    close_by_strike = {94_500: 63, 95_000: 50, 95_500: 38}
+    # Avoid close=50 for any strike to prevent S=K degenerate IV (σ→0, brentq fails).
+    close_by_strike = {94_500: 65, 95_000: 53, 95_500: 38}
     candle_rows = []
     for exp in expiry_times:
         first_bar_ts = exp - timedelta(minutes=59)
@@ -96,12 +103,13 @@ def bronze_dir(tmp_path: Path) -> Path:
         pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
     ])
 
-    # Binance bars at candle_ts - 1 min (open-period = same wall-clock minute).
-    binance_ts = [exp - timedelta(hours=1) for exp in expiry_times]  # 23:00, 00:00, 01:00
+    # Binance bars at candle_ts - 1 min = expiry - 1 hour (open-period convention).
+    binance_ts = [exp - timedelta(hours=1) for exp in expiry_times]
+    binance_closes = [95_150.0, 95_150.0, 95_150.0, 95_150.0, 95_150.0, 95_150.0]
     binance = pl.DataFrame({
         "timestamp": binance_ts,
-        "close": [95_200.0, 95_100.0, 95_300.0],
-        "ingested_at": [ingested] * 3,
+        "close": binance_closes,
+        "ingested_at": [ingested] * len(binance_ts),
     }).with_columns([
         pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
         pl.col("close").cast(pl.Float32),

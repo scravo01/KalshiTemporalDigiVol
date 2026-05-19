@@ -18,9 +18,17 @@ _MIN_VALID_STRIKES = 3
 
 _JOIN_SQL = """
 WITH first_bar AS (
-    -- For each hourly contract in the three snapshot windows (UTC expiry hours 0, 1, 2),
+    -- For each contract in all 6 midnight windows (UTC expiry hours 22,23,0,1,2,3),
     -- find the first volume-positive candle in the full 60-minute trading window.
     -- Kalshi candles use end_period_ts; the window spans (expiry - 60min, expiry].
+    --
+    -- Snapshot labels (relative to Asian open at 00:00 UTC = T0 window-open):
+    --   22:00 expiry → window opens 21:00 UTC → T-3
+    --   23:00 expiry → window opens 22:00 UTC → T-2
+    --   00:00 expiry → window opens 23:00 UTC → T-1
+    --   01:00 expiry → window opens 00:00 UTC → T0
+    --   02:00 expiry → window opens 01:00 UTC → T+1
+    --   03:00 expiry → window opens 02:00 UTC → T+2
     SELECT
         c.ticker,
         MIN(c.timestamp) AS first_ts
@@ -29,7 +37,7 @@ WITH first_bar AS (
     WHERE c.volume > 0
       AND c.timestamp > m.expiry_time - INTERVAL '60 minutes'
       AND c.timestamp <= m.expiry_time
-      AND extract('hour' FROM m.expiry_time) IN (0, 1, 2)
+      AND extract('hour' FROM m.expiry_time) IN (22, 23, 0, 1, 2, 3)
     GROUP BY c.ticker
 ),
 snapshot_candles AS (
@@ -39,9 +47,12 @@ snapshot_candles AS (
         m.strike,
         m.expiry_time,
         CASE extract('hour' FROM m.expiry_time)
-            WHEN 0 THEN 'T-1'
-            WHEN 1 THEN 'T0'
-            WHEN 2 THEN 'T+1'
+            WHEN 22 THEN 'T-3'
+            WHEN 23 THEN 'T-2'
+            WHEN 0  THEN 'T-1'
+            WHEN 1  THEN 'T0'
+            WHEN 2  THEN 'T+1'
+            WHEN 3  THEN 'T+2'
         END AS snapshot,
         c.timestamp AS snapshot_ts,
         c.close     AS digi_px,

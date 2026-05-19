@@ -337,7 +337,7 @@ class TestSilverIntegration:
         ])
         df = pl.read_parquet(bronze_dir / "silver" / "contracts.parquet")
         snaps = set(df["snapshot"].cast(pl.Utf8).unique().to_list())
-        assert snaps == {"T-1", "T0", "T+1"}
+        assert snaps == {"T-3", "T-2", "T-1", "T0", "T+1", "T+2"}
 
     def test_implied_vol_all_positive(self, bronze_dir):
         runner = CliRunner()
