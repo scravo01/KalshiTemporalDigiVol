@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 
 BRONZE_DIR = Path("data/bronze")
 
-# UTC settlement hours captured around midnight (10pm, 11pm, midnight, 1am, 2am, 3am)
-SETTLEMENT_HOURS: list[int] = [22, 23, 0, 1, 2, 3]
+# All 24 UTC settlement hours — every hourly Kalshi binary contract in the ET day
+SETTLEMENT_HOURS: list[int] = list(range(24))
 
 
 def markets_path(bronze_dir: Path, trade_date: date) -> Path:

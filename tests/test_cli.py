@@ -169,16 +169,18 @@ class TestBronzeKalshiIntegration:
         bronze.mkdir()
 
         trade_date = date(2024, 5, 25)
-        settlement_hours = [22, 23, 0, 1, 2, 3]
+        # All 24 ET-day hours: UTC 04:00 May 25 through 03:00 May 26
+        expiry_times = (
+            [datetime(2024, 5, 25, h, 0, 0, tzinfo=timezone.utc) for h in range(4, 24)]
+            + [datetime(2024, 5, 26, h, 0, 0, tzinfo=timezone.utc) for h in range(0, 4)]
+        )
         ingested = datetime.now(timezone.utc)
 
-        # One market per settlement hour (single ATM-ish strike for simplicity)
+        # One market per expiry window (single strike for simplicity)
         market_rows = []
-        for hour in settlement_hours:
-            expiry = datetime(trade_date.year, trade_date.month, trade_date.day,
-                              hour, 0, 0, tzinfo=timezone.utc)
+        for expiry in expiry_times:
             market_rows.append({
-                "ticker": f"KXBTCD-25MAY24-H{hour:02d}-T95000",
+                "ticker": f"KXBTCD-25MAY24-H{expiry.hour:02d}-T95000",
                 "trade_date": trade_date,
                 "strike": 95_000,
                 "expiry_time": expiry,
@@ -198,10 +200,8 @@ class TestBronzeKalshiIntegration:
 
         # 1-minute candles at 30-min intervals within each 1-hour trading window
         candle_rows = []
-        for hour in settlement_hours:
-            expiry = datetime(trade_date.year, trade_date.month, trade_date.day,
-                              hour, 0, 0, tzinfo=timezone.utc)
-            ticker = f"KXBTCD-25MAY24-H{hour:02d}-T95000"
+        for expiry in expiry_times:
+            ticker = f"KXBTCD-25MAY24-H{expiry.hour:02d}-T95000"
             t = expiry - timedelta(hours=1)
             while t <= expiry:
                 candle_rows.append({
@@ -217,13 +217,11 @@ class TestBronzeKalshiIntegration:
             pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
         ])
 
-        # Binance: spot at window-open for each settlement hour
+        # Binance: spot at window-open for each expiry (95_150 ≠ any strike)
         binance_rows = []
-        for hour in settlement_hours:
-            expiry = datetime(trade_date.year, trade_date.month, trade_date.day,
-                              hour, 0, 0, tzinfo=timezone.utc)
+        for expiry in expiry_times:
             window_start = expiry - timedelta(hours=1)
-            binance_rows.append({"timestamp": window_start, "close": 95_000.0,
+            binance_rows.append({"timestamp": window_start, "close": 95_150.0,
                                   "ingested_at": ingested})
         pl.DataFrame(binance_rows).with_columns([
             pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
@@ -268,9 +266,10 @@ class TestBronzeKalshiIntegration:
     def test_candles_on_expiry_day(self, tmp_path):
         bronze = self._run(tmp_path)
         df = pl.read_parquet(bronze / "kalshi_candles_2024-05-25.parquet")
-        # Timestamps span window-opens (21:00 May 24 for 22:00 expiry) through last expiry (23:00 May 25)
-        assert df["timestamp"].min() >= datetime(2024, 5, 24, 21, 0, 0, tzinfo=timezone.utc)
-        assert df["timestamp"].max() <= datetime(2024, 5, 25, 23, 0, 0, tzinfo=timezone.utc)
+        # First window: expiry 04:00 UTC May 25 (T+3), window opens 03:00 UTC May 25
+        # Last window:  expiry 03:00 UTC May 26 (T+2)
+        assert df["timestamp"].min() >= datetime(2024, 5, 25, 3, 0, 0, tzinfo=timezone.utc)
+        assert df["timestamp"].max() <= datetime(2024, 5, 26, 3, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Integration: bronze-binance ───────────────────────────────────────────────
@@ -337,7 +336,10 @@ class TestSilverIntegration:
         ])
         df = pl.read_parquet(bronze_dir / "silver" / "contracts.parquet")
         snaps = set(df["snapshot"].cast(pl.Utf8).unique().to_list())
-        assert snaps == {"T-3", "T-2", "T-1", "T0", "T+1", "T+2"}
+        expected = (
+            {f"T-{i}" for i in range(1, 12)} | {"T0"} | {f"T+{i}" for i in range(1, 13)}
+        )
+        assert snaps == expected
 
     def test_implied_vol_all_positive(self, bronze_dir):
         runner = CliRunner()

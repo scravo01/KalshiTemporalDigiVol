@@ -16,7 +16,7 @@ STATS_PATH = GOLD_DIR / "summary_stats.csv"
 
 IV_MIN = 0.20
 IV_MAX = 5.00
-_SNAPSHOT_ORDER = ["T-3", "T-2", "T-1", "T0", "T+1", "T+2"]
+_SNAPSHOT_ORDER = [f"T-{i}" for i in range(11, 0, -1)] + ["T0"] + [f"T+{i}" for i in range(1, 13)]
 
 
 def run() -> None:

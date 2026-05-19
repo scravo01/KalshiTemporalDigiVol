@@ -64,20 +64,17 @@ def _make_binance_parquet(trade_date: date, spot: float, tmp_path: Path) -> Path
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_hour_filter_keeps_only_settlement_hours():
-    """After the hour filter, only contracts whose expiry_time.hour is in SETTLEMENT_HOURS survive."""
+def test_hour_filter_is_passthrough_for_all_hours():
+    """SETTLEMENT_HOURS covers all 24 UTC hours — the filter keeps every contract."""
     trade_date = date(2026, 5, 1)
-    markets_target = pl.concat([
+    markets = pl.concat([
         _make_markets(trade_date, [95_000, 95_500], expiry_hour=h)
-        for h in SETTLEMENT_HOURS
+        for h in range(24)
     ])
-    markets_other = _make_markets(trade_date, [90_000], expiry_hour=12)
-    all_markets = pl.concat([markets_target, markets_other])
+    filtered = markets.filter(pl.col("expiry_time").dt.hour().is_in(SETTLEMENT_HOURS))
 
-    filtered = all_markets.filter(pl.col("expiry_time").dt.hour().is_in(SETTLEMENT_HOURS))
-
-    assert len(filtered) == len(SETTLEMENT_HOURS) * 2
-    assert set(filtered["expiry_time"].dt.hour().unique().to_list()) == set(SETTLEMENT_HOURS)
+    assert len(filtered) == len(markets)
+    assert set(filtered["expiry_time"].dt.hour().unique().to_list()) == set(range(24))
 
 
 def test_strike_ladder_selects_9():
@@ -141,7 +138,7 @@ class TestCandleOutput:
     """
 
     TRADE_DATE = date(2026, 5, 2)
-    SETTLEMENT_HOURS = [22, 23, 0, 1, 2, 3]
+    SETTLEMENT_HOURS = list(range(24))
     SPOT = 95_000.0
     # 9 strikes per expiry hour (ATM + 4 each side at $500)
     STRIKES_PER_HOUR = [93_000, 93_500, 94_000, 94_500, 95_000, 95_500, 96_000, 96_500, 97_000]

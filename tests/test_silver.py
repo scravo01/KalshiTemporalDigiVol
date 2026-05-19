@@ -43,10 +43,17 @@ class TestSilverSchema:
         assert silver_df["delta"].dtype == pl.Float32
 
 
+_ALL_SNAPSHOTS = (
+    {f"T-{i}" for i in range(1, 12)}
+    | {"T0"}
+    | {f"T+{i}" for i in range(1, 13)}
+)
+
+
 class TestSilverContent:
-    def test_six_snapshots_produced(self, silver_df):
+    def test_all_snapshots_produced(self, silver_df):
         snaps = set(silver_df["snapshot"].cast(pl.Utf8).unique().to_list())
-        assert snaps == {"T-3", "T-2", "T-1", "T0", "T+1", "T+2"}
+        assert snaps == _ALL_SNAPSHOTS
 
     def test_delta_values_in_range(self, silver_df):
         assert (silver_df["delta"] >= 0.02).all()
