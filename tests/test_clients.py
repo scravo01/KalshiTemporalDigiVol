@@ -2,20 +2,32 @@
 import asyncio
 import re
 from datetime import date, datetime, timezone
+from unittest.mock import patch
 
 import polars as pl
 import pytest
 from aioresponses import aioresponses
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
 
 from src.clients.kalshi_client import BASE_URL as KALSHI_BASE, KalshiClient
 from src.clients.binance_client import BASE_URL as BINANCE_BASE, BinanceClient
+
+# Generate a test RSA-2048 key once for all tests
+_TEST_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_TEST_PEM = _TEST_PRIVATE_KEY.private_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PrivateFormat.TraditionalOpenSSL,
+    encryption_algorithm=serialization.NoEncryption(),
+).decode()
 
 # ── URL patterns (regex) — aioresponses includes query params in the match key ─
 
 _CUTOFF_RE   = re.compile(rf"{re.escape(KALSHI_BASE)}/historical/cutoff.*")
 _MARKETS_RE  = re.compile(rf"{re.escape(KALSHI_BASE)}/historical/markets.*")
-_CANDLES_RE  = re.compile(rf"{re.escape(KALSHI_BASE)}/historical/market-candlesticks.*")
+_CANDLES_RE  = re.compile(rf"{re.escape(KALSHI_BASE)}/markets/candlesticks.*")
 _KLINES_RE   = re.compile(rf"{re.escape(BINANCE_BASE)}/api/v3/klines.*")
+# Note: BASE_URL is imported so this regex auto-updates if the URL changes
 
 _MARKET = {
     "ticker": "KXBTCD-25MAY24-B95000",
@@ -39,7 +51,8 @@ def _make_client(cutoff_ts: int = 9_999_999_999) -> KalshiClient:
     """Construct KalshiClient with mocked cutoff HTTP call."""
     with aioresponses() as m:
         m.get(_CUTOFF_RE, payload={"market_settled_ts": cutoff_ts})
-        return KalshiClient(api_key="test-key")
+        with patch.dict("os.environ", {"KEY_ID": "test-key-id"}):
+            return KalshiClient(api_key=_TEST_PEM)
 
 
 # ── KalshiClient init ─────────────────────────────────────────────────────────
@@ -48,7 +61,8 @@ class TestKalshiClientInit:
     def test_cutoff_parsed_as_utc_datetime(self):
         with aioresponses() as m:
             m.get(_CUTOFF_RE, payload={"market_settled_ts": 1_700_000_000})
-            client = KalshiClient(api_key="test-key")
+            with patch.dict("os.environ", {"KEY_ID": "test-key-id"}):
+                client = KalshiClient(api_key=_TEST_PEM)
         assert client.historical_cutoff == datetime.fromtimestamp(1_700_000_000, tz=timezone.utc)
 
     def test_is_historical_before_cutoff(self):

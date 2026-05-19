@@ -12,8 +12,11 @@ Research project testing whether ATM implied vol and 25-delta skew on Kalshi BTC
 # Create environment and install dependencies
 uv sync
 
-# Run the full pipeline (bronze → silver → gold)
-uv run python run_pipeline.py
+# Run a full pipeline stage (uses .env for KALSHI_API_KEY)
+uv run kvol bronze-kalshi --start-date 2026-03-19 --end-date 2026-05-18
+uv run kvol bronze-binance --start-date 2026-03-19 --end-date 2026-05-18
+uv run kvol silver
+uv run kvol pipeline  # runs all stages
 
 # Run tests
 uv run pytest tests/ -v
@@ -33,29 +36,27 @@ The pipeline follows a bronze/silver/gold medallion pattern with strict layer co
 
 ```
 src/clients/         # API wrappers — Kalshi and Binance, return polars DataFrames
-src/etl/bronze/      # Extract API → parquet (raw, never drop rows)
+src/cli/main.py      # Click CLI: bronze-kalshi, bronze-binance, silver, pipeline
+src/etl/base.py      # Abstract BaseETL with async extract/transform/load
+src/etl/bronze/      # Extract API → parquet (raw, minimal transformation)
 src/etl/silver/      # Join + feature engineering using DuckDB
 src/etl/gold/        # Stats and plots only — consumes silver parquet
 data/{bronze,silver,gold}/
-run_pipeline.py      # Single entrypoint, runs all stages in sequence
+run_pipeline.py      # Thin shim delegating to `kvol pipeline`
 ```
 
-**Clients** (`src/clients/`): Both clients return `polars` DataFrames. The Kalshi client must route between live and historical endpoints based on the cutoff returned by `GET /historical/cutoff` — contracts older than ~3 months require `/historical/`. The Binance client paginates `BTCUSDT` 1m klines (max 1000 bars per call).
+**Kalshi API (as of 2026)**: Base URL `https://api.elections.kalshi.com/trade-api/v2`. Authentication is RSA-PSS (not Bearer token) — `.env` must contain `KEY_ID` (UUID) and `KALSHI_API_KEY` (RSA-2048 PEM private key). Signing message: `timestamp_ms + METHOD + /trade-api/v2 + path`. Markets are now **hourly** binary options (e.g., `KXBTCD-26MAY1901-T85799.99`) settling each UTC hour with ~188 strikes. Old daily format (`KXBTCD-25MAY24-B95000`) no longer active.
 
-**Bronze** (`src/etl/bronze/`): Minimal transformation — standardize column names/dtypes, add `ingested_at` UTC timestamp, write to parquet. Exception: zero-volume Kalshi candle bars are dropped at ingest (logged). See `docs/data.md` for full schemas, dtype choices, and size estimates.
+**Clients** (`src/clients/`): Both clients are async (`aiohttp`). Kalshi client uses `aiolimiter.AsyncLimiter` (10 req/s), `asyncio.Semaphore(5)` for parallel candle batches, and 3-attempt retry logic for transient failures. Binance uses `api.binance.us` (`.com` is geo-blocked). The Kalshi client routes between `/historical/markets` and `/markets` based on the cutoff from `GET /historical/cutoff`.
 
-**Silver** (`src/etl/silver/`): The most complex stage. Uses DuckDB for joining Kalshi 1m candles to Binance spot on UTC timestamp across millions of rows. Filters to three daily snapshots (23:00, 00:00, 01:00 UTC). Calls `implied_vol.py` to invert digital Black-Scholes per (ticker, snapshot). Output: one row per `(trade_date, snapshot)` with `atm_iv` and `skew_25d`. Drops rows with fewer than 3 valid strikes (log reason, don't crash).
+**Bronze** (`src/etl/bronze/`): Kalshi candle window starts at 23:00 UTC day-before (to capture T-1 snapshots) and ends at 23:59 UTC on the last date. Zero-volume candle rows are dropped at ingest. Binance window starts 2h before the first trade date and ends 2h after. All writes are zstd level 3 parquet.
 
-**Gold** (`src/etl/gold/`): Computes Δatm_iv and Δskew between snapshots, runs paired t-test + Wilcoxon + Cohen's d, outputs `summary_stats.csv` and two boxplots.
+**Candle price format**: New API returns `yes_ask.close_dollars` and `yes_bid.close_dollars` (USD string, e.g., "0.23"). Mid-price is computed and stored as cents (UInt8, 0–100). Old API returned `price.close` as integer cents directly — both formats are handled.
 
-## Key Implementation Constraints
+**Silver** (`src/etl/silver/`): DuckDB join with `SET TimeZone='UTC'`. Snapshots are T-1 (23:00 UTC prior day), T0 (00:00 UTC), T+1 (01:00 UTC). Filter `expiry_time > snapshot_ts` ensures only open markets are sampled. Time-to-expiry T is computed dynamically as `(expiry_time - snapshot_ts).total_seconds() / (365.25 * 24 * 3600)` — not hardcoded.
 
-**Timestamps**: All timestamps must be UTC throughout — no local time anywhere.
-
-**Kalshi contract prices**: Raw values are in cents (0–100). Only `close` prices are stored and used — open/high/low are discarded at ingest. Normalize close to (0–1) before IV inversion. Filter out contracts priced below 2 or above 98 — too deep ITM/OTM for reliable vol. Same close-only rule applies to Binance: only `close` (BTC spot) is stored.
-
-**Implied vol inversion** (`src/etl/silver/implied_vol.py`): Kalshi binary markets are cash-or-nothing digital calls. A closed-form solution exists — substituting `u = σ√T` into `N⁻¹(p) = ln(S/K)/u − u/2` yields a quadratic in `u`. Root selection: ITM contracts have one positive root (`u = −d2* + √discriminant`); OTM contracts have two — take the smaller (`u = −d2* − √discriminant`); fall back to `scipy.optimize.brentq` at ATM. Expiry T uses settlement at 4pm ET (~21:00 UTC): T-1 snapshot = 22/8760 yr, T0 = 21/8760 yr, T+1 = 20/8760 yr. See `docs/data.md` for full derivation.
+**Implied vol inversion** (`src/etl/silver/implied_vol.py`): Kalshi binary markets are cash-or-nothing digital calls. A closed-form solution: substituting `u = σ√T` into `N⁻¹(p) = ln(S/K)/u − u/2` yields a quadratic in `u`. Root selection: ITM → `u = −d2* + √disc`; OTM → `u = −d2* − √disc`; ATM → `scipy.optimize.brentq`. `compute_t` is kept for tests but not used by the silver ETL.
 
 **25-delta skew**: +25Δ strike is where `N(d2) ≈ 0.75`; −25Δ is where `N(d2) ≈ 0.25`. Kalshi strikes are discrete — use the closest available strike to each delta target.
 
-**Primary DataFrame library**: `polars` everywhere — clients, ETL, analysis. DuckDB is used only for the silver-layer joins/windowing where SQL expressiveness helps across large datasets.
+**Primary DataFrame library**: `polars` everywhere. DuckDB is used only for silver-layer joins.

@@ -1,32 +1,70 @@
 import asyncio
+import base64
 import logging
+import os
+import time
 from datetime import date, datetime, timezone
 from typing import Optional
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [1.0, 3.0, 9.0]  # seconds between retries
 
 import aiohttp
 import polars as pl
 from aiolimiter import AsyncLimiter
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
-BATCH_SIZE = 7          # max tickers per candle request (10k candles / ~1 260 per ticker)
+BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
+_API_PATH_PREFIX = "/trade-api/v2"  # path component prepended when signing requests
+BATCH_SIZE = 5          # max tickers per candle request (10k candles / ~1 260 per ticker)
 CONCURRENCY = 5         # parallel candle requests
-RATE_LIMIT = 20         # requests per second
+RATE_LIMIT = 10         # requests per second (conservative)
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 
 class KalshiClient:
     def __init__(self, api_key: str) -> None:
-        self.api_key = api_key
+        # api_key holds the RSA PEM private key; KEY_ID env var is the key UUID
+        self.key_id: str = os.environ.get("KEY_ID", "")
+        pem = api_key.encode() if isinstance(api_key, str) else api_key
+        self._private_key = serialization.load_pem_private_key(pem, password=None)
+        # Session is created lazily in the ETL event loop, not here, because
+        # asyncio.run() below creates a separate loop that is torn down afterwards.
+        self._session: Optional[aiohttp.ClientSession] = None
         self.historical_cutoff: datetime = asyncio.run(self._fetch_historical_cutoff())
         logger.info("Kalshi historical cutoff: %s", self.historical_cutoff)
 
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(timeout=_TIMEOUT)
+        return self._session
+
     # ── internal helpers ──────────────────────────────────────────────────────
 
-    def _headers(self) -> dict:
-        return {"Authorization": f"Bearer {self.api_key}"}
+    def _make_headers(self, method: str, path: str) -> dict:
+        """Generate per-request RSA-PSS signed headers. `path` is the endpoint path (/historical/...)."""
+        timestamp_ms = str(int(time.time() * 1000))
+        full_path = _API_PATH_PREFIX + path
+        msg = (timestamp_ms + method.upper() + full_path).encode("utf-8")
+        sig = self._private_key.sign(
+            msg,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        return {
+            "KALSHI-ACCESS-KEY": self.key_id,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
+            "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
+            "Content-Type": "application/json",
+        }
 
     async def _get(
         self,
@@ -38,16 +76,35 @@ class KalshiClient:
         if limiter:
             async with limiter:
                 pass  # acquire token before request
-        async with session.get(
-            f"{BASE_URL}{path}", params=params or {}, timeout=_TIMEOUT
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+        last_exc: Exception = RuntimeError("no attempts made")
+        for attempt, backoff in enumerate([0.0] + _RETRY_BACKOFF):
+            if backoff:
+                await asyncio.sleep(backoff)
+            try:
+                headers = self._make_headers("GET", path)
+                async with session.get(
+                    f"{BASE_URL}{path}", params=params or {}, headers=headers, timeout=_TIMEOUT
+                ) as resp:
+                    resp.raise_for_status()
+                    return await resp.json()
+            except aiohttp.ClientResponseError as exc:
+                if 400 <= exc.status < 500:
+                    raise  # client error — retrying won't help
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    logger.warning("Request to %s failed (attempt %d/%d): %s — retrying in %.0fs",
+                                   path, attempt + 1, _MAX_RETRIES, exc, _RETRY_BACKOFF[attempt])
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES - 1:
+                    logger.warning("Request to %s failed (attempt %d/%d): %s — retrying in %.0fs",
+                                   path, attempt + 1, _MAX_RETRIES, exc, _RETRY_BACKOFF[attempt])
+        raise last_exc
 
     # ── cutoff (called once at init) ──────────────────────────────────────────
 
     async def _fetch_historical_cutoff(self) -> datetime:
-        async with aiohttp.ClientSession(headers=self._headers(), timeout=_TIMEOUT) as session:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
             data = await self._get(session, "/historical/cutoff")
         ts = data.get("market_settled_ts")
         if ts is None:
@@ -70,23 +127,25 @@ class KalshiClient:
         start_dt = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
         end_dt = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc)
 
-        async with aiohttp.ClientSession(headers=self._headers(), timeout=_TIMEOUT) as session:
-            limiter = AsyncLimiter(RATE_LIMIT, 1.0)
-            for use_historical in (True, False):
-                if use_historical and start_dt >= self.historical_cutoff:
-                    continue
-                if not use_historical and end_dt < self.historical_cutoff:
-                    continue
+        session = self._get_session()
+        limiter = AsyncLimiter(RATE_LIMIT, 1.0)
+        for use_historical in (True, False):
+            if use_historical and start_dt >= self.historical_cutoff:
+                continue
+            if not use_historical and end_dt < self.historical_cutoff:
+                continue
 
-                path = "/historical/markets" if use_historical else "/markets"
-                params: dict = {"series_ticker": "KXBTCD", "limit": 200}
-                if use_historical:
-                    params["max_close_ts"] = int(self.historical_cutoff.timestamp())
-                    params["min_close_ts"] = int(start_dt.timestamp())
-                else:
-                    params["min_close_ts"] = int(self.historical_cutoff.timestamp())
-                    params["max_close_ts"] = int(end_dt.timestamp())
+            path = "/historical/markets" if use_historical else "/markets"
+            params: dict = {"series_ticker": "KXBTCD", "limit": 200}
+            if use_historical:
+                params["max_close_ts"] = int(self.historical_cutoff.timestamp())
+                params["min_close_ts"] = int(start_dt.timestamp())
+            else:
+                params["min_close_ts"] = int(self.historical_cutoff.timestamp())
+                params["max_close_ts"] = int(end_dt.timestamp())
 
+            label = "historical" if use_historical else "live"
+            with tqdm(desc=f"Kalshi markets ({label})", unit=" pages", leave=True) as pbar:
                 while True:
                     async with limiter:
                         data = await self._get(session, path, params)
@@ -106,15 +165,28 @@ class KalshiClient:
                             or m.get("expected_expiration_ts")
                         )
                         sr = m.get("result") or m.get("settlement_value_dollars")
+                        settlement_price: Optional[float] = None
+                        if sr not in (None, "", "unknown"):
+                            if sr == "yes":
+                                settlement_price = 1.0
+                            elif sr == "no":
+                                settlement_price = 0.0
+                            else:
+                                try:
+                                    settlement_price = float(sr)
+                                except (TypeError, ValueError):
+                                    pass
                         rows.append({
                             "ticker": ticker,
                             "trade_date": trade_dt,
                             "strike": strike,
                             "expiry_time": _parse_timestamp(expiry_raw),
                             "status": m.get("status", "unknown"),
-                            "settlement_price": float(sr) if sr not in (None, "", "unknown") else None,
+                            "settlement_price": settlement_price,
                             "ingested_at": ingested_at,
                         })
+                    pbar.update(1)
+                    pbar.set_postfix(markets=len(rows))
                     cursor = data.get("cursor")
                     if not cursor:
                         break
@@ -139,10 +211,10 @@ class KalshiClient:
         tickers: list[str],
         start_ts: datetime,
         end_ts: datetime,
-        is_historical: bool,
+        is_historical: bool = False,
     ) -> pl.DataFrame:
         """Fetch candles for all tickers, running up to CONCURRENCY requests in parallel."""
-        path = "/historical/market-candlesticks" if is_historical else "/markets/candlesticks"
+        path = "/markets/candlesticks"
         base_params = {
             "start_ts": int(start_ts.timestamp()),
             "end_ts": int(end_ts.timestamp()),
@@ -153,21 +225,30 @@ class KalshiClient:
 
         sem = asyncio.Semaphore(CONCURRENCY)
         limiter = AsyncLimiter(RATE_LIMIT, 1.0)
+        session = self._get_session()
 
-        async with aiohttp.ClientSession(headers=self._headers(), timeout=_TIMEOUT) as session:
-            async def _fetch_batch(batch: list[str]) -> list[dict]:
-                async with sem:
-                    async with limiter:
+        async def _fetch_batch(batch: list[str]) -> list[dict]:
+            async with sem:
+                async with limiter:
+                    try:
                         data = await self._get(
-                            session, path, {**base_params, "tickers": ",".join(batch)}
+                            session, path, {**base_params, "market_tickers": ",".join(batch)}
                         )
-                return _parse_candle_response(data, ingested_at)
+                    except aiohttp.ClientResponseError as exc:
+                        if exc.status == 400:
+                            logger.warning(
+                                "Candle 400 for batch starting %s — skipping (settled/unavailable)",
+                                batch[0] if batch else "",
+                            )
+                            return []
+                        raise
+            return _parse_candle_response(data, ingested_at)
 
-            label = "historical" if is_historical else "live"
-            all_rows: list[list[dict]] = await atqdm.gather(
-                *[_fetch_batch(b) for b in batches],
-                desc=f"Kalshi candles ({label})",
-            )
+        label = "historical" if is_historical else "live"
+        all_rows: list[list[dict]] = await atqdm.gather(
+            *[_fetch_batch(b) for b in batches],
+            desc=f"Kalshi candles ({label})",
+        )
 
         rows = [r for batch_rows in all_rows for r in batch_rows]
         if not rows:
@@ -193,15 +274,22 @@ class KalshiClient:
 
 def _parse_candle_response(data: dict, ingested_at: datetime) -> list[dict]:
     candles_by_ticker: dict = {}
+
     if "candles" in data and isinstance(data["candles"], dict):
+        # Old format: {"candles": {"TICKER": [...]}}
         candles_by_ticker = data["candles"]
+    elif "markets" in data and isinstance(data["markets"], list):
+        # New format: {"markets": [{"candlesticks": [...], "market_ticker": "..."}]}
+        for entry in data["markets"]:
+            ticker = entry.get("market_ticker") or entry.get("ticker", "")
+            candles_by_ticker[ticker] = entry.get("candlesticks") or entry.get("candles", [])
     elif "markets_candles" in data:
         for entry in data["markets_candles"]:
             candles_by_ticker[entry["ticker"]] = entry.get("candles", [])
     else:
         raise KeyError(
             f"Unexpected candle response shape. Keys: {list(data.keys())}. "
-            "Expected 'candles' (dict) or 'markets_candles' (list)."
+            "Expected 'candles' (dict), 'markets' (list), or 'markets_candles' (list)."
         )
 
     rows = []
@@ -214,14 +302,25 @@ def _parse_candle_response(data: dict, ingested_at: datetime) -> list[dict]:
             price_block = c.get("price") or {}
             ask_block = c.get("yes_ask") or {}
             bid_block = c.get("yes_bid") or {}
-            close_raw = (
-                price_block.get("close")
-                or ask_block.get("close")
-                or bid_block.get("close")
-            )
-            if close_raw is None:
-                continue
-            close_cents = int(round(float(close_raw)))
+
+            # New API uses dollar strings; old API uses integer cents in price.close
+            close_raw = price_block.get("close")
+            if close_raw is not None:
+                close_cents = int(round(float(close_raw)))
+            else:
+                ask_close = ask_block.get("close_dollars") or ask_block.get("close")
+                bid_close = bid_block.get("close_dollars") or bid_block.get("close")
+                if ask_close is not None and bid_close is not None:
+                    # mid-price in dollars → multiply by 100 for cents
+                    mid = (float(ask_close) + float(bid_close)) / 2.0
+                    close_cents = int(round(mid * 100))
+                elif ask_close is not None:
+                    close_cents = int(round(float(ask_close) * 100))
+                elif bid_close is not None:
+                    close_cents = int(round(float(bid_close) * 100))
+                else:
+                    continue
+
             if not (0 <= close_cents <= 100):
                 continue
             volume = int(float(c.get("volume") or c.get("volume_fp") or 0))
@@ -239,20 +338,43 @@ def _parse_candle_response(data: dict, ingested_at: datetime) -> list[dict]:
 
 def _parse_strike(ticker: str) -> Optional[int]:
     try:
-        return int(ticker.split("-B")[-1].split("-")[0])
+        # New format: KXBTCD-26MAY1901-T85799.99 → T prefix with decimal price
+        if "-T" in ticker:
+            raw = ticker.split("-T")[-1].split("-")[0]
+            return int(round(float(raw)))
+        # Old format: KXBTCD-25MAY24-B95000 → B prefix with integer price
+        if "-B" in ticker:
+            return int(ticker.split("-B")[-1].split("-")[0])
+        return None
     except (IndexError, ValueError):
         return None
 
 
 def _parse_trade_date(ticker: str) -> Optional[date]:
+    """Extract the settlement calendar date from a KXBTCD ticker."""
     try:
-        date_part = ticker.split("-B")[0].split("-", 1)[1]
+        # Strip series prefix and strike: KXBTCD-26MAY1901-T85799.99 → 26MAY1901
+        # or KXBTCD-25MAY24-B95000 → 25MAY24
+        separator = "-T" if "-T" in ticker else "-B"
+        date_part = ticker.split(separator)[0].split("-", 1)[1]
         try:
             return date.fromisoformat(date_part)
         except ValueError:
             pass
         from datetime import datetime as _dt
-        return _dt.strptime(date_part, "%d%b%y").date()
+        # Old daily format: 25MAY24 → %d%b%y
+        try:
+            return _dt.strptime(date_part, "%d%b%y").date()
+        except ValueError:
+            pass
+        # New hourly format: 26MAY1901 (yymmmDDHH or yyMMMDDHH)
+        # "26MAY19" is the date part (2026-May-19), "01" is the hour
+        for fmt in ("%y%b%d%H", "%y%b%d"):
+            try:
+                return _dt.strptime(date_part[:8] if len(date_part) >= 8 else date_part, fmt).date()
+            except ValueError:
+                pass
+        return None
     except Exception:
         return None
 

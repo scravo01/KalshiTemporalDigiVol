@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,12 +44,13 @@ class KalshiBronzeETL(BaseETL):
                 continue
             tickers = group_df["ticker"].cast(pl.Utf8).to_list()
             dates = group_df["trade_date"]
-            start_ts = datetime(
-                dates.min().year, dates.min().month, dates.min().day, 0, 0, 0, tzinfo=timezone.utc
-            )
-            end_ts = datetime(
-                dates.max().year, dates.max().month, dates.max().day, 21, 0, 0, tzinfo=timezone.utc
-            )
+            # Start at 23:00 UTC the day before to capture T-1 snapshots
+            min_d = dates.min()
+            prev_day = date(min_d.year, min_d.month, min_d.day) - timedelta(days=1)
+            start_ts = datetime(prev_day.year, prev_day.month, prev_day.day, 23, 0, 0, tzinfo=timezone.utc)
+            # End at 23:59 UTC to capture all intraday settlements + T+1 snapshot
+            max_d = dates.max()
+            end_ts = datetime(max_d.year, max_d.month, max_d.day, 23, 59, 59, tzinfo=timezone.utc)
             df = await self.client.fetch_candles(tickers, start_ts, end_ts, is_historical)
             candle_dfs.append(df)
 

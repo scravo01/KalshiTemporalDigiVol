@@ -6,7 +6,9 @@ import polars as pl
 from tqdm import tqdm
 
 from src.etl.base import BaseETL
-from src.etl.silver.implied_vol import compute_t, invert_iv
+from src.etl.silver.implied_vol import invert_iv
+
+_SECONDS_PER_YEAR = 365.25 * 24 * 3600
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ WITH snapshot_candles AS (
     JOIN kalshi_markets m ON c.ticker = m.ticker
     WHERE extract('minute' FROM c.timestamp) = 0
       AND c.volume > 0
+      AND m.expiry_time > c.timestamp  -- market must still be open at snapshot time
       AND (
             (extract('hour' FROM c.timestamp) = 23
              AND CAST(date_trunc('day', c.timestamp) AS DATE) = CAST(m.trade_date AS DATE) - INTERVAL '1 day')
@@ -102,13 +105,16 @@ class SilverETL(BaseETL):
         rows = raw.to_dicts()
         iv_vals: list[float | None] = []
         for r in tqdm(rows, desc="Computing implied vol", unit=" rows"):
+            expiry = r["expiry_time"]
+            snap = r["snapshot_ts"]
+            T = (expiry - snap).total_seconds() / _SECONDS_PER_YEAR if expiry > snap else None
             iv_vals.append(
                 invert_iv(
                     float(r["digi_px"]),
                     float(r["btc_close"]),
                     float(r["strike"]),
-                    compute_t(r["snapshot"]),
-                )
+                    T if T is not None else 0.0,
+                ) if T is not None else None
             )
 
         result_df = raw.with_columns([

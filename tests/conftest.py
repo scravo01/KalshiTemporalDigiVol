@@ -5,6 +5,30 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+_REPO_ROOT = Path(__file__).parent.parent
+_PROD_DATA = _REPO_ROOT / "data"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _guard_production_data():
+    """Fail loudly if any test writes to or creates files in data/."""
+    def _snapshot(directory: Path) -> dict:
+        if not directory.exists():
+            return {}
+        return {p: p.stat().st_mtime for p in directory.rglob("*") if p.is_file()}
+
+    before = _snapshot(_PROD_DATA)
+    yield
+    after = _snapshot(_PROD_DATA)
+    modified = [str(p) for p in after if after[p] != before.get(p)]
+    created  = [str(p) for p in after if p not in before]
+    problems = modified + created
+    assert not problems, (
+        "Tests must not write to the production data/ directory.\n"
+        f"Modified/created: {problems}\n"
+        "Use tmp_path or --bronze-dir / --silver-dir flags instead."
+    )
+
 
 @pytest.fixture
 def bronze_dir(tmp_path: Path) -> Path:
