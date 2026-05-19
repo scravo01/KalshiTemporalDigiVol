@@ -43,9 +43,9 @@ run_pipeline.py      # Single entrypoint, runs all stages in sequence
 
 **Timestamps**: All timestamps must be UTC throughout — no local time anywhere.
 
-**Kalshi contract prices**: Raw values are in cents (0–100). Normalize to (0–1) before IV inversion. Filter out contracts priced below 2 or above 98 — too deep ITM/OTM for reliable vol.
+**Kalshi contract prices**: Raw values are in cents (0–100). Only `close` prices are stored and used — open/high/low are discarded at ingest. Normalize close to (0–1) before IV inversion. Filter out contracts priced below 2 or above 98 — too deep ITM/OTM for reliable vol. Same close-only rule applies to Binance: only `close` (BTC spot) is stored.
 
-**Implied vol inversion** (`src/etl/silver/implied_vol.py`): Kalshi binary markets are cash-or-nothing digital calls. Invert `digital_price = N(d2)` using `scipy.optimize.brentq`. Expiry T must use settlement at 4pm ET (~21:00 UTC), not midnight.
+**Implied vol inversion** (`src/etl/silver/implied_vol.py`): Kalshi binary markets are cash-or-nothing digital calls. A closed-form solution exists — substituting `u = σ√T` into `N⁻¹(p) = ln(S/K)/u − u/2` yields a quadratic in `u`. Root selection: ITM contracts have one positive root (`u = −d2* + √discriminant`); OTM contracts have two — take the smaller (`u = −d2* − √discriminant`); fall back to `scipy.optimize.brentq` at ATM. Expiry T uses settlement at 4pm ET (~21:00 UTC): T-1 snapshot = 22/8760 yr, T0 = 21/8760 yr, T+1 = 20/8760 yr. See `docs/data.md` for full derivation.
 
 **25-delta skew**: +25Δ strike is where `N(d2) ≈ 0.75`; −25Δ is where `N(d2) ≈ 0.25`. Kalshi strikes are discrete — use the closest available strike to each delta target.
 
