@@ -3,16 +3,15 @@ from pathlib import Path
 
 import duckdb
 import polars as pl
+from tqdm import tqdm
 
+from src.etl.base import BaseETL
 from src.etl.silver.implied_vol import compute_t, invert_iv
 
 logger = logging.getLogger(__name__)
 
-# Module-level path vars — tests override these directly
 BRONZE_DIR = Path("data/bronze")
 SILVER_DIR = Path("data/silver")
-SILVER_PATH = SILVER_DIR / "contracts.parquet"
-
 _MIN_VALID_STRIKES = 3
 
 _JOIN_SQL = """
@@ -64,82 +63,94 @@ ORDER BY sc.trade_date, sc.snapshot, sc.strike
 """
 
 
-def run() -> None:
-    logger.info("Silver ETL: starting")
+class SilverETL(BaseETL):
+    def __init__(
+        self,
+        bronze_dir: Path = BRONZE_DIR,
+        silver_dir: Path = SILVER_DIR,
+    ) -> None:
+        self.bronze_dir = bronze_dir
+        self.silver_dir = silver_dir
+        self.silver_path = silver_dir / "contracts.parquet"
 
-    markets_path = BRONZE_DIR / "kalshi_markets.parquet"
-    candles_path = BRONZE_DIR / "kalshi_candles.parquet"
-    klines_path = BRONZE_DIR / "binance_btc_1m.parquet"
+    async def extract(self) -> pl.DataFrame:
+        markets_path = self.bronze_dir / "kalshi_markets.parquet"
+        candles_path = self.bronze_dir / "kalshi_candles.parquet"
+        klines_path = self.bronze_dir / "binance_btc_1m.parquet"
 
-    for p in (markets_path, candles_path, klines_path):
-        if not p.exists():
-            raise FileNotFoundError(f"Bronze file missing: {p}")
+        for p in (markets_path, candles_path, klines_path):
+            if not p.exists():
+                raise FileNotFoundError(f"Bronze file missing: {p}")
 
-    # ── DuckDB join ───────────────────────────────────────────────────────────
-    conn = duckdb.connect()
-    conn.execute("SET TimeZone='UTC'")
-    conn.execute(f"CREATE VIEW kalshi_markets AS SELECT * FROM read_parquet('{markets_path}')")
-    conn.execute(f"CREATE VIEW kalshi_candles AS SELECT * FROM read_parquet('{candles_path}')")
-    conn.execute(f"CREATE VIEW binance_klines  AS SELECT * FROM read_parquet('{klines_path}')")
+        conn = duckdb.connect()
+        conn.execute("SET TimeZone='UTC'")
+        conn.execute(f"CREATE VIEW kalshi_markets AS SELECT * FROM read_parquet('{markets_path}')")
+        conn.execute(f"CREATE VIEW kalshi_candles AS SELECT * FROM read_parquet('{candles_path}')")
+        conn.execute(f"CREATE VIEW binance_klines  AS SELECT * FROM read_parquet('{klines_path}')")
+        raw_df: pl.DataFrame = conn.execute(_JOIN_SQL).pl()
+        conn.close()
 
-    raw_df: pl.DataFrame = conn.execute(_JOIN_SQL).pl()
-    conn.close()
+        logger.info("DuckDB join produced %d rows", len(raw_df))
+        if raw_df.is_empty():
+            logger.warning("Silver ETL produced no rows — check bronze data coverage")
+        return raw_df
 
-    logger.info(f"DuckDB join produced {len(raw_df)} rows")
-    if raw_df.is_empty():
-        logger.warning("Silver ETL produced no rows — check bronze data coverage")
-        return
+    async def transform(self, raw: pl.DataFrame) -> pl.DataFrame:
+        if raw.is_empty():
+            return raw
 
-    # ── compute delta and implied vol ─────────────────────────────────────────
-    result_df = raw_df.with_columns([
-        (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
-        pl.struct(["digi_px", "btc_close", "strike", "snapshot"])
-        .map_elements(
-            lambda s: invert_iv(
-                float(s["digi_px"]),
-                float(s["btc_close"]),
-                float(s["strike"]),
-                compute_t(s["snapshot"]),
-            ),
-            return_dtype=pl.Float64,
-        )
-        .alias("implied_vol"),
-    ])
+        rows = raw.to_dicts()
+        iv_vals: list[float | None] = []
+        for r in tqdm(rows, desc="Computing implied vol", unit=" rows"):
+            iv_vals.append(
+                invert_iv(
+                    float(r["digi_px"]),
+                    float(r["btc_close"]),
+                    float(r["strike"]),
+                    compute_t(r["snapshot"]),
+                )
+            )
 
-    # ── cast to final schema ──────────────────────────────────────────────────
-    final_df = result_df.rename({"ticker": "digi_contract_name"}).select([
-        pl.col("trade_date").cast(pl.Date),
-        pl.col("snapshot").cast(pl.Categorical),
-        pl.col("snapshot_ts").cast(pl.Datetime("us", "UTC")),
-        pl.col("digi_contract_name").cast(pl.Categorical),
-        pl.col("strike").cast(pl.UInt32),
-        pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
-        pl.col("digi_px").cast(pl.UInt8),
-        pl.col("delta").cast(pl.Float32),
-        pl.col("implied_vol").cast(pl.Float32),
-        pl.col("btc_close").cast(pl.Float32),
-        pl.col("volume").cast(pl.UInt32),
-    ])
+        result_df = raw.with_columns([
+            (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
+            pl.Series("implied_vol", iv_vals, dtype=pl.Float64).alias("implied_vol"),
+        ])
 
-    # ── validate and filter ───────────────────────────────────────────────────
-    n_before = len(final_df)
-    valid_df = final_df.filter(pl.col("volume") > 0).drop_nulls(subset=["implied_vol"])
-    n_null_iv = n_before - len(valid_df)
-    if n_null_iv:
-        logger.info(f"Dropped {n_null_iv} rows with null/invalid IV")
+        final_df = result_df.rename({"ticker": "digi_contract_name"}).select([
+            pl.col("trade_date").cast(pl.Date),
+            pl.col("snapshot").cast(pl.Categorical),
+            pl.col("snapshot_ts").cast(pl.Datetime("us", "UTC")),
+            pl.col("digi_contract_name").cast(pl.Categorical),
+            pl.col("strike").cast(pl.UInt32),
+            pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
+            pl.col("digi_px").cast(pl.UInt8),
+            pl.col("delta").cast(pl.Float32),
+            pl.col("implied_vol").cast(pl.Float32),
+            pl.col("btc_close").cast(pl.Float32),
+            pl.col("volume").cast(pl.UInt32),
+        ])
 
-    # Drop (trade_date, snapshot) groups with fewer than 3 valid strikes
-    group_counts = (
-        valid_df.group_by(["trade_date", "snapshot"])
-        .agg(pl.len().alias("n_valid"))
-    )
-    thin_groups = group_counts.filter(pl.col("n_valid") < _MIN_VALID_STRIKES)
-    if len(thin_groups):
-        logger.info(f"Dropping {len(thin_groups)} (trade_date, snapshot) groups with < {_MIN_VALID_STRIKES} strikes")
-        sufficient = group_counts.filter(pl.col("n_valid") >= _MIN_VALID_STRIKES).select(["trade_date", "snapshot"])
-        valid_df = valid_df.join(sufficient, on=["trade_date", "snapshot"], how="inner")
+        n_before = len(final_df)
+        valid_df = final_df.filter(pl.col("volume") > 0).drop_nulls(subset=["implied_vol"])
+        n_dropped = n_before - len(valid_df)
+        if n_dropped:
+            logger.info("Dropped %d rows with null/invalid IV", n_dropped)
 
-    # ── write ─────────────────────────────────────────────────────────────────
-    SILVER_DIR.mkdir(parents=True, exist_ok=True)
-    valid_df.write_parquet(SILVER_PATH, compression="zstd", compression_level=3)
-    logger.info(f"Silver ETL complete: {len(valid_df)} rows → {SILVER_PATH}")
+        group_counts = valid_df.group_by(["trade_date", "snapshot"]).agg(pl.len().alias("n_valid"))
+        thin = group_counts.filter(pl.col("n_valid") < _MIN_VALID_STRIKES)
+        if len(thin):
+            logger.info(
+                "Dropping %d (trade_date, snapshot) groups with < %d strikes",
+                len(thin), _MIN_VALID_STRIKES,
+            )
+            sufficient = group_counts.filter(pl.col("n_valid") >= _MIN_VALID_STRIKES).select(
+                ["trade_date", "snapshot"]
+            )
+            valid_df = valid_df.join(sufficient, on=["trade_date", "snapshot"], how="inner")
+
+        return valid_df
+
+    async def load(self, data: pl.DataFrame) -> None:
+        self.silver_dir.mkdir(parents=True, exist_ok=True)
+        data.write_parquet(self.silver_path, compression="zstd", compression_level=3)
+        logger.info("Silver ETL complete: %d rows → %s", len(data), self.silver_path)
