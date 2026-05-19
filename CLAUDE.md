@@ -9,14 +9,23 @@ Research project testing whether ATM implied vol and 25-delta skew on Kalshi BTC
 ## Commands
 
 ```bash
-# Run the full pipeline (bronze → silver → gold)
-python run_pipeline.py
+# Create environment and install dependencies
+uv sync
 
-# Install dependencies
-pip install -r requirements.txt
+# Run the full pipeline (bronze → silver → gold)
+uv run python run_pipeline.py
+
+# Run tests
+uv run pytest tests/ -v
+
+# Run a single test file
+uv run pytest tests/test_implied_vol.py -v
+
+# Launch the Streamlit UI (after pipeline has run)
+uv run streamlit run src/ui/app.py
 ```
 
-There is no test suite or linter configured yet. The `.gitignore` includes `.ruff_cache/`, so Ruff is the intended linter when added.
+The `.gitignore` includes `.ruff_cache/`, so Ruff is the intended linter when added.
 
 ## Architecture
 
