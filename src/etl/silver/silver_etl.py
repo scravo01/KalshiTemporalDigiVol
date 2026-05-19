@@ -17,37 +17,38 @@ SILVER_DIR = Path("data/silver")
 _MIN_VALID_STRIKES = 3
 
 _JOIN_SQL = """
-WITH snapshot_candles AS (
+WITH first_bar AS (
+    -- For each hourly contract in the three snapshot windows (UTC expiry hours 0, 1, 2),
+    -- find the first volume-positive candle in the full 60-minute trading window.
+    -- Kalshi candles use end_period_ts; the window spans (expiry - 60min, expiry].
+    SELECT
+        c.ticker,
+        MIN(c.timestamp) AS first_ts
+    FROM kalshi_candles c
+    JOIN kalshi_markets m ON c.ticker = m.ticker
+    WHERE c.volume > 0
+      AND c.timestamp > m.expiry_time - INTERVAL '60 minutes'
+      AND c.timestamp <= m.expiry_time
+      AND extract('hour' FROM m.expiry_time) IN (0, 1, 2)
+    GROUP BY c.ticker
+),
+snapshot_candles AS (
     SELECT
         m.trade_date,
         m.ticker,
         m.strike,
         m.expiry_time,
-        CASE
-            WHEN extract('hour' FROM c.timestamp) = 23
-             AND CAST(date_trunc('day', c.timestamp) AS DATE) = CAST(m.trade_date AS DATE) - INTERVAL '1 day'
-            THEN 'T-1'
-            WHEN extract('hour' FROM c.timestamp) = 0
-             AND CAST(date_trunc('day', c.timestamp) AS DATE) = CAST(m.trade_date AS DATE)
-            THEN 'T0'
-            WHEN extract('hour' FROM c.timestamp) = 1
-             AND CAST(date_trunc('day', c.timestamp) AS DATE) = CAST(m.trade_date AS DATE)
-            THEN 'T+1'
+        CASE extract('hour' FROM m.expiry_time)
+            WHEN 0 THEN 'T-1'
+            WHEN 1 THEN 'T0'
+            WHEN 2 THEN 'T+1'
         END AS snapshot,
         c.timestamp AS snapshot_ts,
         c.close     AS digi_px,
         c.volume
     FROM kalshi_candles c
     JOIN kalshi_markets m ON c.ticker = m.ticker
-    WHERE extract('minute' FROM c.timestamp) = 0
-      AND c.volume > 0
-      AND m.expiry_time > c.timestamp  -- market must still be open at snapshot time
-      AND (
-            (extract('hour' FROM c.timestamp) = 23
-             AND CAST(date_trunc('day', c.timestamp) AS DATE) = CAST(m.trade_date AS DATE) - INTERVAL '1 day')
-         OR (extract('hour' FROM c.timestamp) IN (0, 1)
-             AND CAST(date_trunc('day', c.timestamp) AS DATE) = CAST(m.trade_date AS DATE))
-      )
+    JOIN first_bar fb ON c.ticker = fb.ticker AND c.timestamp = fb.first_ts
 )
 SELECT
     sc.trade_date,
@@ -60,7 +61,9 @@ SELECT
     sc.volume,
     b.close AS btc_close
 FROM snapshot_candles sc
-JOIN binance_klines b ON b.timestamp = sc.snapshot_ts
+-- Binance uses open-period timestamps; the bar at (snapshot_ts - 1 min) covers
+-- the same 1-minute window as the Kalshi end-period bar at snapshot_ts.
+JOIN binance_klines b ON b.timestamp = sc.snapshot_ts - INTERVAL '1 minute'
 WHERE sc.snapshot IS NOT NULL
 ORDER BY sc.trade_date, sc.snapshot, sc.strike
 """
@@ -77,18 +80,24 @@ class SilverETL(BaseETL):
         self.silver_path = silver_dir / "contracts.parquet"
 
     async def extract(self) -> pl.DataFrame:
-        markets_path = self.bronze_dir / "kalshi_markets.parquet"
-        candles_path = self.bronze_dir / "kalshi_candles.parquet"
+        markets_files = sorted(self.bronze_dir.glob("kalshi_markets_*.parquet"))
+        candles_files = sorted(self.bronze_dir.glob("kalshi_candles_*.parquet"))
         klines_path = self.bronze_dir / "binance_btc_1m.parquet"
 
-        for p in (markets_path, candles_path, klines_path):
-            if not p.exists():
-                raise FileNotFoundError(f"Bronze file missing: {p}")
+        if not markets_files:
+            raise FileNotFoundError(f"No kalshi_markets_*.parquet files found in {self.bronze_dir}")
+        if not candles_files:
+            raise FileNotFoundError(f"No kalshi_candles_*.parquet files found in {self.bronze_dir}")
+        if not klines_path.exists():
+            raise FileNotFoundError(f"Bronze file missing: {klines_path}")
+
+        markets_glob = str(self.bronze_dir / "kalshi_markets_*.parquet")
+        candles_glob = str(self.bronze_dir / "kalshi_candles_*.parquet")
 
         conn = duckdb.connect()
         conn.execute("SET TimeZone='UTC'")
-        conn.execute(f"CREATE VIEW kalshi_markets AS SELECT * FROM read_parquet('{markets_path}')")
-        conn.execute(f"CREATE VIEW kalshi_candles AS SELECT * FROM read_parquet('{candles_path}')")
+        conn.execute(f"CREATE VIEW kalshi_markets AS SELECT * FROM read_parquet('{markets_glob}')")
+        conn.execute(f"CREATE VIEW kalshi_candles AS SELECT * FROM read_parquet('{candles_glob}')")
         conn.execute(f"CREATE VIEW binance_klines  AS SELECT * FROM read_parquet('{klines_path}')")
         raw_df: pl.DataFrame = conn.execute(_JOIN_SQL).pl()
         conn.close()

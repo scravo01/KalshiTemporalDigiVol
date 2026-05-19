@@ -162,25 +162,31 @@ class TestBronzeKalshiIntegration:
     """Real ETL logic with a mock client — verifies parquet output."""
 
     def _run(self, tmp_path: Path) -> Path:
+        from datetime import timedelta
+
         from src.etl.bronze.kalshi_bronze import KalshiBronzeETL
         bronze = tmp_path / "bronze"
         bronze.mkdir()
 
-        snap_ts = [
-            datetime(2024, 5, 24, 23, 0, 0, tzinfo=timezone.utc),
-            datetime(2024, 5, 25, 0, 0, 0, tzinfo=timezone.utc),
-            datetime(2024, 5, 25, 1, 0, 0, tzinfo=timezone.utc),
-        ]
+        trade_date = date(2024, 5, 25)
+        settlement_hours = [22, 23, 0, 1, 2, 3]
         ingested = datetime.now(timezone.utc)
-        markets_df = pl.DataFrame({
-            "ticker": ["KXBTCD-25MAY24-B95000"],
-            "trade_date": [date(2024, 5, 25)],
-            "strike": [95_000],
-            "expiry_time": [datetime(2024, 5, 25, 21, 0, tzinfo=timezone.utc)],
-            "status": ["settled"],
-            "settlement_price": [None],
-            "ingested_at": [ingested],
-        }).with_columns([
+
+        # One market per settlement hour (single ATM-ish strike for simplicity)
+        market_rows = []
+        for hour in settlement_hours:
+            expiry = datetime(trade_date.year, trade_date.month, trade_date.day,
+                              hour, 0, 0, tzinfo=timezone.utc)
+            market_rows.append({
+                "ticker": f"KXBTCD-25MAY24-H{hour:02d}-T95000",
+                "trade_date": trade_date,
+                "strike": 95_000,
+                "expiry_time": expiry,
+                "status": "settled",
+                "settlement_price": None,
+                "ingested_at": ingested,
+            })
+        markets_df = pl.DataFrame(market_rows).with_columns([
             pl.col("ticker").cast(pl.Categorical),
             pl.col("trade_date").cast(pl.Date),
             pl.col("strike").cast(pl.UInt32),
@@ -189,13 +195,21 @@ class TestBronzeKalshiIntegration:
             pl.col("settlement_price").cast(pl.Float32),
             pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
         ])
-        candles_df = pl.DataFrame({
-            "ticker": ["KXBTCD-25MAY24-B95000"] * 3,
-            "timestamp": snap_ts,
-            "close": [50, 51, 52],
-            "volume": [100, 110, 120],
-            "ingested_at": [ingested] * 3,
-        }).with_columns([
+
+        # 1-minute candles at 30-min intervals within each 1-hour trading window
+        candle_rows = []
+        for hour in settlement_hours:
+            expiry = datetime(trade_date.year, trade_date.month, trade_date.day,
+                              hour, 0, 0, tzinfo=timezone.utc)
+            ticker = f"KXBTCD-25MAY24-H{hour:02d}-T95000"
+            t = expiry - timedelta(hours=1)
+            while t <= expiry:
+                candle_rows.append({
+                    "ticker": ticker, "timestamp": t, "close": 50, "volume": 100,
+                    "ingested_at": ingested,
+                })
+                t += timedelta(minutes=30)
+        candles_df = pl.DataFrame(candle_rows).with_columns([
             pl.col("ticker").cast(pl.Categorical),
             pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
             pl.col("close").cast(pl.UInt8),
@@ -203,36 +217,60 @@ class TestBronzeKalshiIntegration:
             pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
         ])
 
+        # Binance: spot at window-open for each settlement hour
+        binance_rows = []
+        for hour in settlement_hours:
+            expiry = datetime(trade_date.year, trade_date.month, trade_date.day,
+                              hour, 0, 0, tzinfo=timezone.utc)
+            window_start = expiry - timedelta(hours=1)
+            binance_rows.append({"timestamp": window_start, "close": 95_000.0,
+                                  "ingested_at": ingested})
+        pl.DataFrame(binance_rows).with_columns([
+            pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
+            pl.col("close").cast(pl.Float32),
+            pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
+        ]).write_parquet(bronze / "binance_btc_1m.parquet")
+
+        def _candles_for(tickers, *args, **kwargs):
+            return candles_df.filter(pl.col("ticker").cast(pl.Utf8).is_in(tickers))
+
         client = MagicMock()
         client.historical_cutoff = datetime(2317, 1, 1, tzinfo=timezone.utc)
         client.fetch_markets = AsyncMock(return_value=markets_df)
-        client.fetch_candles = AsyncMock(return_value=candles_df)
+        client.fetch_candles = AsyncMock(side_effect=_candles_for)
 
-        etl = KalshiBronzeETL(client=client, start_date=date(2024, 5, 25),
-                               end_date=date(2024, 5, 25), bronze_dir=bronze)
+        etl = KalshiBronzeETL(client=client, start_date=trade_date, end_date=trade_date,
+                               bronze_dir=bronze)
         etl.run()
         return bronze
 
     def test_writes_markets_parquet(self, tmp_path):
         bronze = self._run(tmp_path)
-        assert (bronze / "kalshi_markets.parquet").exists()
+        assert (bronze / "kalshi_markets_2024-05-25.parquet").exists()
 
     def test_writes_candles_parquet(self, tmp_path):
         bronze = self._run(tmp_path)
-        assert (bronze / "kalshi_candles.parquet").exists()
+        assert (bronze / "kalshi_candles_2024-05-25.parquet").exists()
 
     def test_markets_schema(self, tmp_path):
         bronze = self._run(tmp_path)
-        df = pl.read_parquet(bronze / "kalshi_markets.parquet")
+        df = pl.read_parquet(bronze / "kalshi_markets_2024-05-25.parquet")
         assert df["trade_date"].dtype == pl.Date
         assert df["strike"].dtype == pl.UInt32
         assert df["expiry_time"].dtype == pl.Datetime("us", "UTC")
 
     def test_candles_no_zero_volume(self, tmp_path):
         bronze = self._run(tmp_path)
-        df = pl.read_parquet(bronze / "kalshi_candles.parquet")
+        df = pl.read_parquet(bronze / "kalshi_candles_2024-05-25.parquet")
         assert (df["volume"] > 0).all()
         assert df["close"].dtype == pl.UInt8
+
+    def test_candles_on_expiry_day(self, tmp_path):
+        bronze = self._run(tmp_path)
+        df = pl.read_parquet(bronze / "kalshi_candles_2024-05-25.parquet")
+        # Timestamps span window-opens (21:00 May 24 for 22:00 expiry) through last expiry (23:00 May 25)
+        assert df["timestamp"].min() >= datetime(2024, 5, 24, 21, 0, 0, tzinfo=timezone.utc)
+        assert df["timestamp"].max() <= datetime(2024, 5, 25, 23, 0, 0, tzinfo=timezone.utc)
 
 
 # ── Integration: bronze-binance ───────────────────────────────────────────────

@@ -53,7 +53,7 @@ def cli() -> None:
 @click.option("--bronze-dir", type=click.Path(), default="data/bronze", show_default=True,
               help="Output directory for bronze parquets.")
 def bronze_kalshi(start_date: date, end_date: date, api_key: str, bronze_dir: str) -> None:
-    """Fetch Kalshi markets and candles → bronze parquets."""
+    """Fetch Kalshi markets and candles → bronze parquets (hours 22,23,0,1,2,3 UTC)."""
     logging.basicConfig(level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ")
     client = KalshiClient(api_key=api_key)
     KalshiBronzeETL(client=client, start_date=start_date, end_date=end_date,
@@ -94,11 +94,11 @@ def pipeline(start_date: date, end_date: date, api_key: str, data_dir: str) -> N
     bronze = root / "bronze"
     silver_dir = root / "silver"
 
+    BinanceBronzeETL(client=BinanceClient(), start_date=start_date, end_date=end_date,
+                     bronze_dir=bronze).run()
     kalshi_client = KalshiClient(api_key=api_key)
     KalshiBronzeETL(client=kalshi_client, start_date=start_date, end_date=end_date,
                     bronze_dir=bronze).run()
-    BinanceBronzeETL(client=BinanceClient(), start_date=start_date, end_date=end_date,
-                     bronze_dir=bronze).run()
     SilverETL(bronze_dir=bronze, silver_dir=silver_dir).run()
     gold_run()
 

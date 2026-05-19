@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import math
 import os
 import time
 from datetime import date, datetime, timezone
@@ -36,6 +37,9 @@ class KalshiClient:
         # Session is created lazily in the ETL event loop, not here, because
         # asyncio.run() below creates a separate loop that is torn down afterwards.
         self._session: Optional[aiohttp.ClientSession] = None
+        # Shared across all fetch_markets and fetch_candles calls so the 10 req/s
+        # budget is respected even when called hundreds of times in a backfill loop.
+        self._limiter = AsyncLimiter(RATE_LIMIT, 1.0)
         self.historical_cutoff: datetime = asyncio.run(self._fetch_historical_cutoff())
         logger.info("Kalshi historical cutoff: %s", self.historical_cutoff)
 
@@ -88,7 +92,7 @@ class KalshiClient:
                     resp.raise_for_status()
                     return await resp.json()
             except aiohttp.ClientResponseError as exc:
-                if 400 <= exc.status < 500:
+                if 400 <= exc.status < 500 and exc.status != 429:
                     raise  # client error — retrying won't help
                 last_exc = exc
                 if attempt < _MAX_RETRIES - 1:
@@ -128,7 +132,7 @@ class KalshiClient:
         end_dt = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc)
 
         session = self._get_session()
-        limiter = AsyncLimiter(RATE_LIMIT, 1.0)
+        limiter = self._limiter
         for use_historical in (True, False):
             if use_historical and start_dt >= self.historical_cutoff:
                 continue
@@ -145,7 +149,10 @@ class KalshiClient:
                 params["max_close_ts"] = int(end_dt.timestamp())
 
             label = "historical" if use_historical else "live"
-            with tqdm(desc=f"Kalshi markets ({label})", unit=" pages", leave=True) as pbar:
+            days = (end_date - start_date).days + 1
+            estimated_pages = max(1, math.ceil(days * 3_500 / 200))
+            with tqdm(desc=f"Kalshi markets ({label})", unit=" pages",
+                      total=estimated_pages, leave=True) as pbar:
                 while True:
                     async with limiter:
                         data = await self._get(session, path, params)
@@ -189,6 +196,8 @@ class KalshiClient:
                     pbar.set_postfix(markets=len(rows))
                     cursor = data.get("cursor")
                     if not cursor:
+                        pbar.total = pbar.n  # snap to actual so bar shows 100%
+                        pbar.refresh()
                         break
                     params["cursor"] = cursor
 
@@ -212,19 +221,20 @@ class KalshiClient:
         start_ts: datetime,
         end_ts: datetime,
         is_historical: bool = False,
+        period_interval: int = 1,
     ) -> pl.DataFrame:
         """Fetch candles for all tickers, running up to CONCURRENCY requests in parallel."""
         path = "/markets/candlesticks"
         base_params = {
             "start_ts": int(start_ts.timestamp()),
             "end_ts": int(end_ts.timestamp()),
-            "period_interval": 1,
+            "period_interval": period_interval,
         }
         batches = [tickers[i : i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
         ingested_at = datetime.now(timezone.utc).replace(microsecond=0)
 
         sem = asyncio.Semaphore(CONCURRENCY)
-        limiter = AsyncLimiter(RATE_LIMIT, 1.0)
+        limiter = self._limiter
         session = self._get_session()
 
         async def _fetch_batch(batch: list[str]) -> list[dict]:
