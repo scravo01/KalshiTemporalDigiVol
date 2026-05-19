@@ -11,6 +11,7 @@ from src.etl.bronze.binance_bronze import BinanceBronzeETL
 from src.etl.bronze.kalshi_bronze import KalshiBronzeETL
 from src.etl.gold.gold_etl import run as gold_run
 from src.etl.silver.silver_etl import SilverETL
+from src.etl.silver.vol_surface_etl import VolSurfaceETL
 
 _LOG_FMT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
@@ -80,6 +81,15 @@ def silver(bronze_dir: str, silver_dir: str) -> None:
     SilverETL(bronze_dir=Path(bronze_dir), silver_dir=Path(silver_dir)).run()
 
 
+@cli.command("vol-surface")
+@click.option("--bronze-dir", type=click.Path(), default="data/bronze", show_default=True)
+@click.option("--silver-dir", type=click.Path(), default="data/silver", show_default=True)
+def vol_surface(bronze_dir: str, silver_dir: str) -> None:
+    """Compute IV at every traded minute → silver/vol_surface.parquet."""
+    logging.basicConfig(level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ")
+    VolSurfaceETL(bronze_dir=Path(bronze_dir), silver_dir=Path(silver_dir)).run()
+
+
 @cli.command("pipeline")
 @click.option("--start-date", type=DATE, default=_default_start, show_default="90 days ago")
 @click.option("--end-date", type=DATE, default=_default_end, show_default="yesterday")
@@ -100,6 +110,7 @@ def pipeline(start_date: date, end_date: date, api_key: str, data_dir: str) -> N
     KalshiBronzeETL(client=kalshi_client, start_date=start_date, end_date=end_date,
                     bronze_dir=bronze).run()
     SilverETL(bronze_dir=bronze, silver_dir=silver_dir).run()
+    VolSurfaceETL(bronze_dir=bronze, silver_dir=silver_dir).run()
     gold_run()
 
 

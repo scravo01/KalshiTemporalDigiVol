@@ -5,11 +5,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import seaborn as sns
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3D projection
 from scipy import stats
+from scipy.interpolate import griddata
 
 logger = logging.getLogger(__name__)
 
 SILVER_PATH = Path("data/silver/contracts.parquet")
+SURFACE_PATH = Path("data/silver/vol_surface.parquet")
 GOLD_DIR = Path("data/gold")
 PLOTS_DIR = GOLD_DIR / "plots"
 STATS_PATH = GOLD_DIR / "summary_stats.csv"
@@ -17,6 +20,7 @@ STATS_PATH = GOLD_DIR / "summary_stats.csv"
 IV_MIN = 0.20
 IV_MAX = 5.00
 _SNAPSHOT_ORDER = [f"T-{i}" for i in range(11, 0, -1)] + ["T0"] + [f"T+{i}" for i in range(1, 13)]
+_SNAP_TO_IDX = {s: i for i, s in enumerate(_SNAPSHOT_ORDER)}
 
 
 def run() -> None:
@@ -25,6 +29,9 @@ def run() -> None:
     stats_df = _compute_stats(features_df)
     _save_stats(stats_df)
     _save_plots(features_df)
+    if SURFACE_PATH.exists():
+        surface_df = pl.read_parquet(SURFACE_PATH)
+        _save_vol_surface_plots(surface_df)
     logger.info("Gold ETL complete")
 
 
@@ -165,3 +172,104 @@ def _save_plots(features_df: pl.DataFrame) -> None:
         fig.savefig(out, dpi=150)
         plt.close(fig)
         logger.info(f"Saved plot → {out}")
+
+
+def _save_vol_surface_plots(surface_df: pl.DataFrame) -> None:
+    """Generate 3D implied-vol surface plots from minute-by-minute vol surface data."""
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Compute log-moneyness = ln(K/S) for every row
+    surface_df = surface_df.with_columns(
+        (pl.col("strike").cast(pl.Float64) / pl.col("btc_close").cast(pl.Float64))
+        .log()
+        .alias("log_moneyness")
+    )
+
+    LM_STEP = 0.005  # bucket size for log-moneyness axis
+
+    surface_df = surface_df.with_columns(
+        ((pl.col("log_moneyness") / LM_STEP).round() * LM_STEP).alias("lm_bucket")
+    ).filter(pl.col("implied_vol").is_not_null() & pl.col("lm_bucket").is_not_null())
+
+    # ── Plot 1: Cross-session surface ─────────────────────────────────────────
+    # Use first bars (minutes_to_expiry >= 55) to approximate the window-open price.
+    first_bars = surface_df.filter(pl.col("minutes_to_expiry") >= 55)
+    agg_cross = (
+        first_bars
+        .filter(pl.col("snapshot").cast(pl.Utf8).is_in(_SNAPSHOT_ORDER))
+        .group_by(["snapshot", "lm_bucket"])
+        .agg(pl.col("implied_vol").median().alias("iv_med"))
+        .filter(pl.col("iv_med").is_not_null())
+    )
+
+    if len(agg_cross) >= 10:
+        snaps = agg_cross["snapshot"].cast(pl.Utf8).to_list()
+        xs = np.array([_SNAP_TO_IDX[s] for s in snaps], dtype=float)
+        ys = np.array(agg_cross["lm_bucket"].to_list(), dtype=float)
+        zs = np.array(agg_cross["iv_med"].to_list(), dtype=float)
+
+        xi = np.arange(len(_SNAPSHOT_ORDER), dtype=float)
+        yi = np.linspace(ys.min(), ys.max(), 30)
+        Xi, Yi = np.meshgrid(xi, yi)
+        Zi = griddata((xs, ys), zs, (Xi, Yi), method="linear")
+
+        fig = plt.figure(figsize=(14, 7))
+        ax = fig.add_subplot(111, projection="3d")
+        surf = ax.plot_surface(Xi, Yi, Zi, cmap="viridis", alpha=0.85, edgecolor="none")
+        fig.colorbar(surf, ax=ax, shrink=0.5, label="Implied Vol")
+        ax.set_xlabel("Session snapshot", labelpad=10)
+        ax.set_ylabel("Log moneyness  ln(K/S)", labelpad=10)
+        ax.set_zlabel("Implied vol", labelpad=8)
+        ax.set_title("BTC Digital Options — Vol Surface Across Sessions", pad=14)
+        tick_positions = list(range(0, len(_SNAPSHOT_ORDER), 4))
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels([_SNAPSHOT_ORDER[i] for i in tick_positions], fontsize=7)
+        ax.view_init(elev=25, azim=-60)
+        fig.tight_layout()
+        out = PLOTS_DIR / "vol_surface_cross_session.png"
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        logger.info("Saved vol surface cross-session plot → %s", out)
+    else:
+        logger.warning("Insufficient data for cross-session vol surface (%d rows)", len(agg_cross))
+
+    # ── Plot 2: Intraday smile evolution per key snapshot ─────────────────────
+    _KEY_SNAPS = ["T-3", "T-2", "T-1", "T0", "T+1", "T+2", "T+3"]
+
+    for snap in _KEY_SNAPS:
+        snap_df = surface_df.filter(pl.col("snapshot").cast(pl.Utf8) == snap)
+        agg_intra = (
+            snap_df
+            .group_by(["minutes_to_expiry", "lm_bucket"])
+            .agg(pl.col("implied_vol").median().alias("iv_med"))
+            .filter(pl.col("iv_med").is_not_null())
+        )
+
+        if len(agg_intra) < 15:
+            logger.warning("Insufficient data for intraday surface %s (%d rows)", snap, len(agg_intra))
+            continue
+
+        xs2 = np.array(agg_intra["minutes_to_expiry"].cast(pl.Float64).to_list(), dtype=float)
+        ys2 = np.array(agg_intra["lm_bucket"].to_list(), dtype=float)
+        zs2 = np.array(agg_intra["iv_med"].to_list(), dtype=float)
+
+        xi2 = np.linspace(xs2.min(), xs2.max(), min(int(xs2.max() - xs2.min()) + 1, 60))
+        yi2 = np.linspace(ys2.min(), ys2.max(), 30)
+        Xi2, Yi2 = np.meshgrid(xi2, yi2)
+        Zi2 = griddata((xs2, ys2), zs2, (Xi2, Yi2), method="linear")
+
+        fig = plt.figure(figsize=(12, 7))
+        ax = fig.add_subplot(111, projection="3d")
+        surf2 = ax.plot_surface(Xi2, Yi2, Zi2, cmap="plasma", alpha=0.85, edgecolor="none")
+        fig.colorbar(surf2, ax=ax, shrink=0.5, label="Implied Vol")
+        ax.set_xlabel("Minutes to expiry", labelpad=10)
+        ax.set_ylabel("Log moneyness  ln(K/S)", labelpad=10)
+        ax.set_zlabel("Implied vol", labelpad=8)
+        ax.set_title(f"Intraday Vol Smile Evolution — {snap}", pad=14)
+        ax.view_init(elev=25, azim=-60)
+        fig.tight_layout()
+        safe_snap = snap.replace("+", "plus").replace("-", "minus")
+        out = PLOTS_DIR / f"vol_surface_intraday_{safe_snap}.png"
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        logger.info("Saved intraday vol surface %s → %s", snap, out)
