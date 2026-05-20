@@ -90,9 +90,15 @@ class VolSurfaceETL(BaseETL):
 
         conn = duckdb.connect()
         conn.execute("SET TimeZone='UTC'")
-        conn.execute(f"CREATE VIEW kalshi_markets  AS SELECT * FROM read_parquet('{markets_glob}')")
-        conn.execute(f"CREATE VIEW kalshi_candles  AS SELECT * FROM read_parquet('{candles_glob}')")
-        conn.execute(f"CREATE VIEW binance_klines  AS SELECT * FROM read_parquet('{klines_path}')")
+        conn.execute(
+            f"CREATE VIEW kalshi_markets  AS SELECT * FROM read_parquet('{markets_glob}')"
+        )
+        conn.execute(
+            f"CREATE VIEW kalshi_candles  AS SELECT * FROM read_parquet('{candles_glob}')"
+        )
+        conn.execute(
+            f"CREATE VIEW binance_klines  AS SELECT * FROM read_parquet('{klines_path}')"
+        )
         raw_df: pl.DataFrame = conn.execute(_SURFACE_SQL).pl()
         conn.close()
 
@@ -107,7 +113,9 @@ class VolSurfaceETL(BaseETL):
         n_before = len(raw)
         raw = raw.filter(pl.col("btc_close").is_not_null())
         if n_before - len(raw):
-            logger.info("Dropped %d rows with null btc_close (Binance gap)", n_before - len(raw))
+            logger.info(
+                "Dropped %d rows with null btc_close (Binance gap)", n_before - len(raw)
+            )
 
         rows = raw.to_dicts()
         iv_vals: list[float | None] = []
@@ -124,29 +132,35 @@ class VolSurfaceETL(BaseETL):
                     float(r["btc_close"]),
                     float(r["strike"]),
                     T,
-                ) if T is not None else None
+                )
+                if T is not None
+                else None
             )
             mins_to_expiry.append(max(0, round(diff_s / 60)) if diff_s >= 0 else 0)
 
-        result = raw.with_columns([
-            pl.Series("minutes_to_expiry", mins_to_expiry, dtype=pl.UInt8),
-            (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
-            pl.Series("implied_vol", iv_vals, dtype=pl.Float64).cast(pl.Float32),
-        ])
+        result = raw.with_columns(
+            [
+                pl.Series("minutes_to_expiry", mins_to_expiry, dtype=pl.UInt8),
+                (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
+                pl.Series("implied_vol", iv_vals, dtype=pl.Float64).cast(pl.Float32),
+            ]
+        )
 
-        final = result.rename({"ticker": "digi_contract_name"}).select([
-            pl.col("trade_date").cast(pl.Date),
-            pl.col("snapshot").cast(pl.Categorical),
-            pl.col("bar_ts").cast(pl.Datetime("us", "UTC")),
-            pl.col("minutes_to_expiry"),
-            pl.col("digi_contract_name").cast(pl.Categorical),
-            pl.col("strike").cast(pl.UInt32),
-            pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
-            pl.col("digi_px").cast(pl.UInt8),
-            pl.col("delta").cast(pl.Float32),
-            pl.col("implied_vol").cast(pl.Float32),
-            pl.col("btc_close").cast(pl.Float32),
-        ])
+        final = result.rename({"ticker": "digi_contract_name"}).select(
+            [
+                pl.col("trade_date").cast(pl.Date),
+                pl.col("snapshot").cast(pl.Categorical),
+                pl.col("bar_ts").cast(pl.Datetime("us", "UTC")),
+                pl.col("minutes_to_expiry"),
+                pl.col("digi_contract_name").cast(pl.Categorical),
+                pl.col("strike").cast(pl.UInt32),
+                pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
+                pl.col("digi_px").cast(pl.UInt8),
+                pl.col("delta").cast(pl.Float32),
+                pl.col("implied_vol").cast(pl.Float32),
+                pl.col("btc_close").cast(pl.Float32),
+            ]
+        )
 
         n_null_iv = final["implied_vol"].is_null().sum()
         if n_null_iv:

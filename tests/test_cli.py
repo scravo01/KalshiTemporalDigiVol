@@ -1,8 +1,9 @@
 """Unit and integration tests for Click entrypoints in src/cli/main.py."""
 import asyncio
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import polars as pl
 import pytest
@@ -48,8 +49,10 @@ def _mock_binance_client() -> MagicMock:
 
 class TestBronzeKalshiUnit:
     def test_missing_api_key_exits_nonzero(self):
-        runner = CliRunner(env={})
-        result = runner.invoke(cli, ["bronze-kalshi", "--start-date", "2024-01-01", "--end-date", "2024-01-07"])
+        runner = CliRunner()
+        clean_env = {k: v for k, v in os.environ.items() if k != "KALSHI_API_KEY"}
+        with patch.dict("os.environ", clean_env, clear=True):
+            result = runner.invoke(cli, ["bronze-kalshi", "--start-date", "2024-01-01", "--end-date", "2024-01-07"])
         assert result.exit_code != 0
 
     def test_invalid_date_format_exits_nonzero(self):
@@ -61,7 +64,7 @@ class TestBronzeKalshiUnit:
         runner = CliRunner(env={"KALSHI_API_KEY": "test-key"})
         with patch("src.cli.main.KalshiClient", return_value=_mock_kalshi_client()), \
              patch("src.cli.main.KalshiBronzeETL") as mock_etl_cls:
-            mock_etl = MagicMock()
+            mock_etl = AsyncMock()
             mock_etl_cls.return_value = mock_etl
             result = runner.invoke(cli, [
                 "bronze-kalshi",
@@ -73,16 +76,16 @@ class TestBronzeKalshiUnit:
         _, kwargs = mock_etl_cls.call_args
         assert kwargs["start_date"] == date(2024, 1, 1)
         assert kwargs["end_date"] == date(2024, 1, 7)
-        mock_etl.run.assert_called_once()
+        mock_etl._pipeline.assert_awaited_once()
 
     def test_client_receives_api_key(self):
         runner = CliRunner(env={"KALSHI_API_KEY": "secret-key"})
         with patch("src.cli.main.KalshiClient") as mock_cls, \
              patch("src.cli.main.KalshiBronzeETL") as mock_etl_cls:
             mock_cls.return_value = _mock_kalshi_client()
-            mock_etl_cls.return_value = MagicMock()
+            mock_etl_cls.return_value = AsyncMock()
             runner.invoke(cli, ["bronze-kalshi", "--start-date", "2024-01-01", "--end-date", "2024-01-07"])
-        mock_cls.assert_called_once_with(api_key="secret-key")
+        mock_cls.assert_called_once_with(api_key="secret-key", session=ANY)
 
 
 # ── Unit: bronze-binance ──────────────────────────────────────────────────────
@@ -92,7 +95,7 @@ class TestBronzeBinanceUnit:
         runner = CliRunner()
         with patch("src.cli.main.BinanceClient", return_value=_mock_binance_client()), \
              patch("src.cli.main.BinanceBronzeETL") as mock_etl_cls:
-            mock_etl = MagicMock()
+            mock_etl = AsyncMock()
             mock_etl_cls.return_value = mock_etl
             result = runner.invoke(cli, [
                 "bronze-binance",
@@ -104,13 +107,13 @@ class TestBronzeBinanceUnit:
         _, kwargs = mock_etl_cls.call_args
         assert kwargs["start_date"] == date(2024, 1, 1)
         assert kwargs["end_date"] == date(2024, 1, 7)
-        mock_etl.run.assert_called_once()
+        mock_etl._pipeline.assert_awaited_once()
 
     def test_no_api_key_required(self, tmp_path):
-        runner = CliRunner(env={})
+        runner = CliRunner()
         with patch("src.cli.main.BinanceClient", return_value=_mock_binance_client()), \
              patch("src.cli.main.BinanceBronzeETL") as mock_etl_cls:
-            mock_etl_cls.return_value = MagicMock()
+            mock_etl_cls.return_value = AsyncMock()
             result = runner.invoke(cli, [
                 "bronze-binance", "--start-date", "2024-01-01", "--end-date", "2024-01-07",
                 "--bronze-dir", str(tmp_path),

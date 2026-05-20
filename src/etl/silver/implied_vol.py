@@ -45,7 +45,7 @@ def invert_iv(p: float, S: float, K: float, T: float) -> Optional[float]:
     price = p / 100.0
     d2_star = norm.ppf(price)
     log_sk = math.log(S / K)
-    disc = d2_star ** 2 + 2.0 * log_sk
+    disc = d2_star**2 + 2.0 * log_sk
 
     if disc < 0:
         return None
@@ -55,7 +55,7 @@ def invert_iv(p: float, S: float, K: float, T: float) -> Optional[float]:
         sqrt_T = math.sqrt(T)
 
         def objective(sigma: float) -> float:
-            d2 = (log_sk - 0.5 * sigma ** 2 * T) / (sigma * sqrt_T)
+            d2 = (log_sk - 0.5 * sigma**2 * T) / (sigma * sqrt_T)
             return norm.cdf(d2) - price
 
         try:
@@ -65,9 +65,9 @@ def invert_iv(p: float, S: float, K: float, T: float) -> Optional[float]:
         return float(sigma)
 
     sqrt_disc = math.sqrt(disc)
-    if S > K:   # ITM — unique positive root
+    if S > K:  # ITM — unique positive root
         u = -d2_star + sqrt_disc
-    else:       # OTM — two positive roots; take the smaller (lower vol)
+    else:  # OTM — two positive roots; take the smaller (lower vol)
         u = -d2_star - sqrt_disc
 
     if u <= 0:

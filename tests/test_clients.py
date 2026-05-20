@@ -48,21 +48,24 @@ _CANDLE_RESPONSE = {
 
 
 def _make_client(cutoff_ts: int = 9_999_999_999) -> KalshiClient:
-    """Construct KalshiClient with mocked cutoff HTTP call."""
+    """Construct KalshiClient and eagerly populate historical_cutoff via mocked HTTP."""
+    with patch.dict("os.environ", {"KEY_ID": "test-key-id"}):
+        client = KalshiClient(api_key=_TEST_PEM)
     with aioresponses() as m:
         m.get(_CUTOFF_RE, payload={"market_settled_ts": cutoff_ts})
-        with patch.dict("os.environ", {"KEY_ID": "test-key-id"}):
-            return KalshiClient(api_key=_TEST_PEM)
+        asyncio.run(client._ensure_cutoff())
+    return client
 
 
 # ── KalshiClient init ─────────────────────────────────────────────────────────
 
 class TestKalshiClientInit:
     def test_cutoff_parsed_as_utc_datetime(self):
+        with patch.dict("os.environ", {"KEY_ID": "test-key-id"}):
+            client = KalshiClient(api_key=_TEST_PEM)
         with aioresponses() as m:
             m.get(_CUTOFF_RE, payload={"market_settled_ts": 1_700_000_000})
-            with patch.dict("os.environ", {"KEY_ID": "test-key-id"}):
-                client = KalshiClient(api_key=_TEST_PEM)
+            asyncio.run(client._ensure_cutoff())
         assert client.historical_cutoff == datetime.fromtimestamp(1_700_000_000, tz=timezone.utc)
 
     def test_is_historical_before_cutoff(self):

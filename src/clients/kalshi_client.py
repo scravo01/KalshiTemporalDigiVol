@@ -5,10 +5,7 @@ import math
 import os
 import time
 from datetime import date, datetime, timezone
-from typing import Optional
-
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = [1.0, 3.0, 9.0]  # seconds between retries
+from typing import ClassVar, Optional
 
 import aiohttp
 import polars as pl
@@ -18,30 +15,35 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from tqdm import tqdm
 from tqdm.asyncio import tqdm as atqdm
 
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [1.0, 3.0, 9.0]  # seconds between retries
+
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 _API_PATH_PREFIX = "/trade-api/v2"  # path component prepended when signing requests
-BATCH_SIZE = 5          # max tickers per candle request (10k candles / ~1 260 per ticker)
-CONCURRENCY = 5         # parallel candle requests
-RATE_LIMIT = 10         # requests per second (conservative)
+BATCH_SIZE = 5  # max tickers per candle request (10k candles / ~1 260 per ticker)
+CONCURRENCY = 3  # parallel candle requests
+RATE_LIMIT = 5  # requests per second — reduced to avoid 429s on large backfills
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 
 class KalshiClient:
-    def __init__(self, api_key: str) -> None:
+    # Shared across all instances so the 10 req/s budget is never doubled in a
+    # backfill loop that creates multiple clients.
+    _limiter: ClassVar[AsyncLimiter] = AsyncLimiter(RATE_LIMIT, 1.0)
+
+    def __init__(
+        self, api_key: str, session: aiohttp.ClientSession | None = None
+    ) -> None:
         # api_key holds the RSA PEM private key; KEY_ID env var is the key UUID
         self.key_id: str = os.environ.get("KEY_ID", "")
         pem = api_key.encode() if isinstance(api_key, str) else api_key
         self._private_key = serialization.load_pem_private_key(pem, password=None)
-        # Session is created lazily in the ETL event loop, not here, because
-        # asyncio.run() below creates a separate loop that is torn down afterwards.
-        self._session: Optional[aiohttp.ClientSession] = None
-        # Shared across all fetch_markets and fetch_candles calls so the 10 req/s
-        # budget is respected even when called hundreds of times in a backfill loop.
-        self._limiter = AsyncLimiter(RATE_LIMIT, 1.0)
-        self.historical_cutoff: datetime = asyncio.run(self._fetch_historical_cutoff())
-        logger.info("Kalshi historical cutoff: %s", self.historical_cutoff)
+        self._session = session
+        # Fetched lazily on first fetch_markets call so __init__ stays sync and
+        # can safely be called inside an already-running event loop.
+        self.historical_cutoff: Optional[datetime] = None
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -87,7 +89,10 @@ class KalshiClient:
             try:
                 headers = self._make_headers("GET", path)
                 async with session.get(
-                    f"{BASE_URL}{path}", params=params or {}, headers=headers, timeout=_TIMEOUT
+                    f"{BASE_URL}{path}",
+                    params=params or {},
+                    headers=headers,
+                    timeout=_TIMEOUT,
                 ) as resp:
                     resp.raise_for_status()
                     return await resp.json()
@@ -96,43 +101,71 @@ class KalshiClient:
                     raise  # client error — retrying won't help
                 last_exc = exc
                 if attempt < _MAX_RETRIES - 1:
-                    logger.warning("Request to %s failed (attempt %d/%d): %s — retrying in %.0fs",
-                                   path, attempt + 1, _MAX_RETRIES, exc, _RETRY_BACKOFF[attempt])
+                    logger.warning(
+                        "Request to %s failed (attempt %d/%d): %s — retrying in %.0fs",
+                        path,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        exc,
+                        _RETRY_BACKOFF[attempt],
+                    )
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 last_exc = exc
                 if attempt < _MAX_RETRIES - 1:
-                    logger.warning("Request to %s failed (attempt %d/%d): %s — retrying in %.0fs",
-                                   path, attempt + 1, _MAX_RETRIES, exc, _RETRY_BACKOFF[attempt])
+                    logger.warning(
+                        "Request to %s failed (attempt %d/%d): %s — retrying in %.0fs",
+                        path,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        exc,
+                        _RETRY_BACKOFF[attempt],
+                    )
         raise last_exc
 
-    # ── cutoff (called once at init) ──────────────────────────────────────────
+    # ── cutoff ────────────────────────────────────────────────────────────────
 
-    async def _fetch_historical_cutoff(self) -> datetime:
-        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
-            data = await self._get(session, "/historical/cutoff")
+    async def _ensure_cutoff(self) -> None:
+        if self.historical_cutoff is not None:
+            return
+        session = self._get_session()
+        data = await self._get(session, "/historical/cutoff")
         ts = data.get("market_settled_ts")
         if ts is None:
             ts = data.get("cutoff")
         if ts is None:
             raise RuntimeError(f"Unexpected /historical/cutoff response: {data}")
         if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            self.historical_cutoff = datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        else:
+            self.historical_cutoff = datetime.fromisoformat(
+                str(ts).replace("Z", "+00:00")
+            )
+        logger.info("Kalshi historical cutoff: %s", self.historical_cutoff)
 
     # ── public API ────────────────────────────────────────────────────────────
 
     def _is_historical(self, trade_date: date) -> bool:
-        dt = datetime(trade_date.year, trade_date.month, trade_date.day, tzinfo=timezone.utc)
+        if self.historical_cutoff is None:
+            raise RuntimeError(
+                "historical_cutoff not yet fetched — call fetch_markets first"
+            )
+        dt = datetime(
+            trade_date.year, trade_date.month, trade_date.day, tzinfo=timezone.utc
+        )
         return dt < self.historical_cutoff
 
     async def fetch_markets(self, start_date: date, end_date: date) -> pl.DataFrame:
+        await self._ensure_cutoff()
         rows: list[dict] = []
         ingested_at = datetime.now(timezone.utc).replace(microsecond=0)
-        start_dt = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
-        end_dt = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc)
+        start_dt = datetime(
+            start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc
+        )
+        end_dt = datetime(
+            end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc
+        )
 
         session = self._get_session()
-        limiter = self._limiter
         for use_historical in (True, False):
             if use_historical and start_dt >= self.historical_cutoff:
                 continue
@@ -151,10 +184,14 @@ class KalshiClient:
             label = "historical" if use_historical else "live"
             days = (end_date - start_date).days + 1
             estimated_pages = max(1, math.ceil(days * 3_500 / 200))
-            with tqdm(desc=f"Kalshi markets ({label})", unit=" pages",
-                      total=estimated_pages, leave=True) as pbar:
+            with tqdm(
+                desc=f"Kalshi markets ({label})",
+                unit=" pages",
+                total=estimated_pages,
+                leave=True,
+            ) as pbar:
                 while True:
-                    async with limiter:
+                    async with self._limiter:
                         data = await self._get(session, path, params)
                     for m in data.get("markets", []):
                         ticker = m.get("ticker", "")
@@ -183,15 +220,17 @@ class KalshiClient:
                                     settlement_price = float(sr)
                                 except (TypeError, ValueError):
                                     pass
-                        rows.append({
-                            "ticker": ticker,
-                            "trade_date": trade_dt,
-                            "strike": strike,
-                            "expiry_time": _parse_timestamp(expiry_raw),
-                            "status": m.get("status", "unknown"),
-                            "settlement_price": settlement_price,
-                            "ingested_at": ingested_at,
-                        })
+                        rows.append(
+                            {
+                                "ticker": ticker,
+                                "trade_date": trade_dt,
+                                "strike": strike,
+                                "expiry_time": _parse_timestamp(expiry_raw),
+                                "status": m.get("status", "unknown"),
+                                "settlement_price": settlement_price,
+                                "ingested_at": ingested_at,
+                            }
+                        )
                     pbar.update(1)
                     pbar.set_postfix(markets=len(rows))
                     cursor = data.get("cursor")
@@ -205,15 +244,17 @@ class KalshiClient:
             logger.warning("fetch_markets returned 0 rows")
             return _empty_markets_df()
 
-        return pl.DataFrame(rows).with_columns([
-            pl.col("ticker").cast(pl.Categorical),
-            pl.col("trade_date").cast(pl.Date),
-            pl.col("strike").cast(pl.UInt32),
-            pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
-            pl.col("status").cast(pl.Categorical),
-            pl.col("settlement_price").cast(pl.Float32),
-            pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
-        ])
+        return pl.DataFrame(rows).with_columns(
+            [
+                pl.col("ticker").cast(pl.Categorical),
+                pl.col("trade_date").cast(pl.Date),
+                pl.col("strike").cast(pl.UInt32),
+                pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
+                pl.col("status").cast(pl.Categorical),
+                pl.col("settlement_price").cast(pl.Float32),
+                pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
+            ]
+        )
 
     async def fetch_candles(
         self,
@@ -230,19 +271,22 @@ class KalshiClient:
             "end_ts": int(end_ts.timestamp()),
             "period_interval": period_interval,
         }
-        batches = [tickers[i : i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
+        batches = [
+            tickers[i : i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)
+        ]
         ingested_at = datetime.now(timezone.utc).replace(microsecond=0)
 
         sem = asyncio.Semaphore(CONCURRENCY)
-        limiter = self._limiter
         session = self._get_session()
 
         async def _fetch_batch(batch: list[str]) -> list[dict]:
             async with sem:
-                async with limiter:
+                async with self._limiter:
                     try:
                         data = await self._get(
-                            session, path, {**base_params, "market_tickers": ",".join(batch)}
+                            session,
+                            path,
+                            {**base_params, "market_tickers": ",".join(batch)},
                         )
                     except aiohttp.ClientResponseError as exc:
                         if exc.status == 400:
@@ -271,16 +315,19 @@ class KalshiClient:
         if dropped:
             logger.debug("Dropped %d zero-volume candle rows", dropped)
 
-        return df.with_columns([
-            pl.col("ticker").cast(pl.Categorical),
-            pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
-            pl.col("close").cast(pl.UInt8),
-            pl.col("volume").cast(pl.UInt32),
-            pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
-        ])
+        return df.with_columns(
+            [
+                pl.col("ticker").cast(pl.Categorical),
+                pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
+                pl.col("close").cast(pl.UInt8),
+                pl.col("volume").cast(pl.UInt32),
+                pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
+            ]
+        )
 
 
 # ── response parsing ──────────────────────────────────────────────────────────
+
 
 def _parse_candle_response(data: dict, ingested_at: datetime) -> list[dict]:
     candles_by_ticker: dict = {}
@@ -292,7 +339,9 @@ def _parse_candle_response(data: dict, ingested_at: datetime) -> list[dict]:
         # New format: {"markets": [{"candlesticks": [...], "market_ticker": "..."}]}
         for entry in data["markets"]:
             ticker = entry.get("market_ticker") or entry.get("ticker", "")
-            candles_by_ticker[ticker] = entry.get("candlesticks") or entry.get("candles", [])
+            candles_by_ticker[ticker] = entry.get("candlesticks") or entry.get(
+                "candles", []
+            )
     elif "markets_candles" in data:
         for entry in data["markets_candles"]:
             candles_by_ticker[entry["ticker"]] = entry.get("candles", [])
@@ -334,17 +383,20 @@ def _parse_candle_response(data: dict, ingested_at: datetime) -> list[dict]:
             if not (0 <= close_cents <= 100):
                 continue
             volume = int(float(c.get("volume") or c.get("volume_fp") or 0))
-            rows.append({
-                "ticker": ticker,
-                "timestamp": ts,
-                "close": close_cents,
-                "volume": volume,
-                "ingested_at": ingested_at,
-            })
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "timestamp": ts,
+                    "close": close_cents,
+                    "volume": volume,
+                    "ingested_at": ingested_at,
+                }
+            )
     return rows
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
 
 def _parse_strike(ticker: str) -> Optional[int]:
     try:
@@ -372,6 +424,7 @@ def _parse_trade_date(ticker: str) -> Optional[date]:
         except ValueError:
             pass
         from datetime import datetime as _dt
+
         # Old daily format: 25MAY24 → %d%b%y
         try:
             return _dt.strptime(date_part, "%d%b%y").date()
@@ -381,7 +434,9 @@ def _parse_trade_date(ticker: str) -> Optional[date]:
         # "26MAY19" is the date part (2026-May-19), "01" is the hour
         for fmt in ("%y%b%d%H", "%y%b%d"):
             try:
-                return _dt.strptime(date_part[:8] if len(date_part) >= 8 else date_part, fmt).date()
+                return _dt.strptime(
+                    date_part[:8] if len(date_part) >= 8 else date_part, fmt
+                ).date()
             except ValueError:
                 pass
         return None
@@ -401,22 +456,26 @@ def _parse_timestamp(raw) -> Optional[datetime]:
 
 
 def _empty_markets_df() -> pl.DataFrame:
-    return pl.DataFrame(schema={
-        "ticker": pl.Categorical,
-        "trade_date": pl.Date,
-        "strike": pl.UInt32,
-        "expiry_time": pl.Datetime("us", "UTC"),
-        "status": pl.Categorical,
-        "settlement_price": pl.Float32,
-        "ingested_at": pl.Datetime("us", "UTC"),
-    })
+    return pl.DataFrame(
+        schema={
+            "ticker": pl.Categorical,
+            "trade_date": pl.Date,
+            "strike": pl.UInt32,
+            "expiry_time": pl.Datetime("us", "UTC"),
+            "status": pl.Categorical,
+            "settlement_price": pl.Float32,
+            "ingested_at": pl.Datetime("us", "UTC"),
+        }
+    )
 
 
 def _empty_candles_df() -> pl.DataFrame:
-    return pl.DataFrame(schema={
-        "ticker": pl.Categorical,
-        "timestamp": pl.Datetime("us", "UTC"),
-        "close": pl.UInt8,
-        "volume": pl.UInt32,
-        "ingested_at": pl.Datetime("us", "UTC"),
-    })
+    return pl.DataFrame(
+        schema={
+            "ticker": pl.Categorical,
+            "timestamp": pl.Datetime("us", "UTC"),
+            "close": pl.UInt8,
+            "volume": pl.UInt32,
+            "ingested_at": pl.Datetime("us", "UTC"),
+        }
+    )

@@ -26,7 +26,9 @@ def candles_path(bronze_dir: Path, trade_date: date) -> Path:
     return bronze_dir / f"kalshi_candles_{trade_date}.parquet"
 
 
-def _strike_ladder(spot: float, available_strikes: list[int], n_steps: int = 4, step: int = 500) -> set[int]:
+def _strike_ladder(
+    spot: float, available_strikes: list[int], n_steps: int = 4, step: int = 500
+) -> set[int]:
     """ATM + n_steps above + n_steps below at $step increments (ATM included)."""
     atm = min(available_strikes, key=lambda k: abs(k - spot))
     targets = {atm + i * step for i in range(-n_steps, n_steps + 1)}
@@ -52,7 +54,10 @@ def _filter_strike_ladder(
         window_start = expiry_ts - timedelta(hours=1)
         row = binance_df.filter(pl.col("timestamp") <= window_start).tail(1)
         if row.is_empty():
-            logger.warning("No Binance spot at or before %s — skipping ATM filter for this window", window_start)
+            logger.warning(
+                "No Binance spot at or before %s — skipping ATM filter for this window",
+                window_start,
+            )
             continue
         spot = float(row["close"][0])
         group = markets_df.filter(pl.col("expiry_time") == expiry_ts)
@@ -62,17 +67,26 @@ def _filter_strike_ladder(
             keep_rows.append((expiry_ts, int(strike)))
 
     if not keep_rows:
-        logger.warning("_filter_strike_ladder: no strikes selected — returning empty markets_df")
+        logger.warning(
+            "_filter_strike_ladder: no strikes selected — returning empty markets_df"
+        )
         return markets_df.clear()
 
     keep_df = pl.DataFrame(
-        {"expiry_time": [r[0] for r in keep_rows], "strike_keep": [r[1] for r in keep_rows]},
+        {
+            "expiry_time": [r[0] for r in keep_rows],
+            "strike_keep": [r[1] for r in keep_rows],
+        },
         schema={"expiry_time": pl.Datetime("us", "UTC"), "strike_keep": pl.Int64},
     )
     return (
-        markets_df
-        .with_columns(pl.col("strike").cast(pl.Int64).alias("strike_i64"))
-        .join(keep_df, left_on=["expiry_time", "strike_i64"], right_on=["expiry_time", "strike_keep"], how="inner")
+        markets_df.with_columns(pl.col("strike").cast(pl.Int64).alias("strike_i64"))
+        .join(
+            keep_df,
+            left_on=["expiry_time", "strike_i64"],
+            right_on=["expiry_time", "strike_keep"],
+            how="inner",
+        )
         .drop("strike_i64")
     )
 
@@ -93,32 +107,50 @@ class KalshiBronzeETL(BaseETL):
         self.settlement_hours = settlement_hours
 
     async def extract(self) -> tuple[pl.DataFrame, pl.DataFrame]:
-        logger.info("Kalshi bronze extract: %s → %s  hours=%s",
-                    self.start_date, self.end_date, self.settlement_hours)
+        logger.info(
+            "Kalshi bronze extract: %s → %s  hours=%s",
+            self.start_date,
+            self.end_date,
+            self.settlement_hours,
+        )
 
         all_dates = [
             self.start_date + timedelta(days=i)
             for i in range((self.end_date - self.start_date).days + 1)
         ]
-        missing_dates = [d for d in all_dates if not markets_path(self.bronze_dir, d).exists()]
+        missing_dates = [
+            d for d in all_dates if not markets_path(self.bronze_dir, d).exists()
+        ]
 
         if not missing_dates:
-            logger.info("All %d dates already on disk — nothing to fetch", len(all_dates))
+            logger.info(
+                "All %d dates already on disk — nothing to fetch", len(all_dates)
+            )
             from src.clients.kalshi_client import _empty_candles_df
+
             return pl.DataFrame(), _empty_candles_df()
 
-        logger.info("%d / %d dates need downloading", len(missing_dates), len(all_dates))
+        logger.info(
+            "%d / %d dates need downloading", len(missing_dates), len(all_dates)
+        )
         fetch_start = min(missing_dates)
         fetch_end = max(missing_dates)
 
         markets_df = await self.client.fetch_markets(fetch_start, fetch_end)
         missing_set = set(missing_dates)
         markets_df = markets_df.filter(pl.col("trade_date").is_in(missing_set))
-        markets_df = markets_df.filter(pl.col("expiry_time").dt.hour().is_in(self.settlement_hours))
-        logger.info("After settlement-hours filter %s: %d markets", self.settlement_hours, len(markets_df))
+        markets_df = markets_df.filter(
+            pl.col("expiry_time").dt.hour().is_in(self.settlement_hours)
+        )
+        logger.info(
+            "After settlement-hours filter %s: %d markets",
+            self.settlement_hours,
+            len(markets_df),
+        )
 
         if markets_df.is_empty():
             from src.clients.kalshi_client import _empty_candles_df
+
             return markets_df, _empty_candles_df()
 
         binance_path = self.bronze_dir / "binance_btc_1m.parquet"
@@ -132,6 +164,7 @@ class KalshiBronzeETL(BaseETL):
 
         if markets_df.is_empty():
             from src.clients.kalshi_client import _empty_candles_df
+
             return markets_df, _empty_candles_df()
 
         # Fetch candles per expiry window (each window = 1 hour before settlement)
@@ -141,7 +174,9 @@ class KalshiBronzeETL(BaseETL):
             group = markets_df.filter(pl.col("expiry_time") == expiry_ts)
             tickers = group["ticker"].cast(pl.Utf8).to_list()
             window_start = expiry_ts - timedelta(hours=1)
-            df = await self.client.fetch_candles(tickers, window_start, expiry_ts, period_interval=1)
+            df = await self.client.fetch_candles(
+                tickers, window_start, expiry_ts, period_interval=1
+            )
             if not df.is_empty():
                 candle_dfs.append(df)
 
@@ -149,6 +184,7 @@ class KalshiBronzeETL(BaseETL):
             candles_df = pl.concat(candle_dfs)
         else:
             from src.clients.kalshi_client import _empty_candles_df
+
             candles_df = _empty_candles_df()
 
         return markets_df, candles_df
@@ -156,7 +192,16 @@ class KalshiBronzeETL(BaseETL):
     async def transform(
         self, raw: tuple[pl.DataFrame, pl.DataFrame]
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
-        return raw
+        markets_df, candles_df = raw
+        if markets_df.is_empty() or candles_df.is_empty():
+            return markets_df, candles_df
+        ticker_to_date = markets_df.select(["ticker", "trade_date"]).with_columns(
+            pl.col("ticker").cast(pl.Utf8)
+        )
+        candles_df = candles_df.with_columns(pl.col("ticker").cast(pl.Utf8)).join(
+            ticker_to_date, on="ticker", how="left"
+        )
+        return markets_df, candles_df
 
     async def load(self, data: tuple[pl.DataFrame, pl.DataFrame]) -> None:
         markets_df, candles_df = data
@@ -164,17 +209,6 @@ class KalshiBronzeETL(BaseETL):
             return
 
         self.bronze_dir.mkdir(parents=True, exist_ok=True)
-
-        ticker_to_date = (
-            markets_df
-            .select(["ticker", "trade_date"])
-            .with_columns(pl.col("ticker").cast(pl.Utf8))
-        )
-        candles_with_date = (
-            candles_df
-            .with_columns(pl.col("ticker").cast(pl.Utf8))
-            .join(ticker_to_date, on="ticker", how="left")
-        ) if not candles_df.is_empty() else candles_df
 
         for trade_date in sorted(markets_df["trade_date"].unique().to_list()):
             mpath = markets_path(self.bronze_dir, trade_date)
@@ -184,13 +218,15 @@ class KalshiBronzeETL(BaseETL):
 
             if not candles_df.is_empty():
                 cpath = candles_path(self.bronze_dir, trade_date)
-                date_candles = (
-                    candles_with_date
-                    .filter(pl.col("trade_date") == trade_date)
-                    .drop("trade_date")
-                )
+                date_candles = candles_df.filter(
+                    pl.col("trade_date") == trade_date
+                ).drop("trade_date")
                 if date_candles.is_empty():
-                    logger.warning("No candle data for %s — skipping candles write", trade_date)
+                    logger.warning(
+                        "No candle data for %s — skipping candles write", trade_date
+                    )
                 else:
-                    date_candles.write_parquet(cpath, compression="zstd", compression_level=3)
+                    date_candles.write_parquet(
+                        cpath, compression="zstd", compression_level=3
+                    )
                     logger.info("Wrote %d candle rows → %s", len(date_candles), cpath)

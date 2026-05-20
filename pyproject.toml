@@ -22,7 +22,9 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "requests>=2.34.2",
     "scipy>=1.17.1",
+    "plotly>=5.24.0",
     "seaborn>=0.13.2",
+    "statsmodels>=0.14.0",
     "streamlit>=1.57.0",
     "tqdm>=4.67.3",
 ]
@@ -33,5 +35,7 @@ kvol = "src.cli.main:main"
 [dependency-groups]
 dev = [
     "aioresponses>=0.7.8",
+    "ipykernel>=6.0.0",
+    "jupyterlab>=4.0.0",
     "pytest>=9.0.3",
 ]

@@ -107,9 +107,13 @@ class SilverETL(BaseETL):
         klines_path = self.bronze_dir / "binance_btc_1m.parquet"
 
         if not markets_files:
-            raise FileNotFoundError(f"No kalshi_markets_*.parquet files found in {self.bronze_dir}")
+            raise FileNotFoundError(
+                f"No kalshi_markets_*.parquet files found in {self.bronze_dir}"
+            )
         if not candles_files:
-            raise FileNotFoundError(f"No kalshi_candles_*.parquet files found in {self.bronze_dir}")
+            raise FileNotFoundError(
+                f"No kalshi_candles_*.parquet files found in {self.bronze_dir}"
+            )
         if not klines_path.exists():
             raise FileNotFoundError(f"Bronze file missing: {klines_path}")
 
@@ -118,9 +122,15 @@ class SilverETL(BaseETL):
 
         conn = duckdb.connect()
         conn.execute("SET TimeZone='UTC'")
-        conn.execute(f"CREATE VIEW kalshi_markets AS SELECT * FROM read_parquet('{markets_glob}')")
-        conn.execute(f"CREATE VIEW kalshi_candles AS SELECT * FROM read_parquet('{candles_glob}')")
-        conn.execute(f"CREATE VIEW binance_klines  AS SELECT * FROM read_parquet('{klines_path}')")
+        conn.execute(
+            f"CREATE VIEW kalshi_markets AS SELECT * FROM read_parquet('{markets_glob}')"
+        )
+        conn.execute(
+            f"CREATE VIEW kalshi_candles AS SELECT * FROM read_parquet('{candles_glob}')"
+        )
+        conn.execute(
+            f"CREATE VIEW binance_klines  AS SELECT * FROM read_parquet('{klines_path}')"
+        )
         raw_df: pl.DataFrame = conn.execute(_JOIN_SQL).pl()
         conn.close()
 
@@ -138,52 +148,71 @@ class SilverETL(BaseETL):
         for r in tqdm(rows, desc="Computing implied vol", unit=" rows"):
             expiry = r["expiry_time"]
             snap = r["snapshot_ts"]
-            T = (expiry - snap).total_seconds() / _SECONDS_PER_YEAR if expiry > snap else None
+            T = (
+                (expiry - snap).total_seconds() / _SECONDS_PER_YEAR
+                if expiry > snap
+                else None
+            )
             iv_vals.append(
                 invert_iv(
                     float(r["digi_px"]),
                     float(r["btc_close"]),
                     float(r["strike"]),
                     T if T is not None else 0.0,
-                ) if T is not None else None
+                )
+                if T is not None
+                else None
             )
 
-        result_df = raw.with_columns([
-            (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
-            pl.Series("implied_vol", iv_vals, dtype=pl.Float64).alias("implied_vol"),
-        ])
+        result_df = raw.with_columns(
+            [
+                (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
+                pl.Series("implied_vol", iv_vals, dtype=pl.Float64).alias(
+                    "implied_vol"
+                ),
+            ]
+        )
 
-        final_df = result_df.rename({"ticker": "digi_contract_name"}).select([
-            pl.col("trade_date").cast(pl.Date),
-            pl.col("snapshot").cast(pl.Categorical),
-            pl.col("snapshot_ts").cast(pl.Datetime("us", "UTC")),
-            pl.col("digi_contract_name").cast(pl.Categorical),
-            pl.col("strike").cast(pl.UInt32),
-            pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
-            pl.col("digi_px").cast(pl.UInt8),
-            pl.col("delta").cast(pl.Float32),
-            pl.col("implied_vol").cast(pl.Float32),
-            pl.col("btc_close").cast(pl.Float32),
-            pl.col("volume").cast(pl.UInt32),
-        ])
+        final_df = result_df.rename({"ticker": "digi_contract_name"}).select(
+            [
+                pl.col("trade_date").cast(pl.Date),
+                pl.col("snapshot").cast(pl.Categorical),
+                pl.col("snapshot_ts").cast(pl.Datetime("us", "UTC")),
+                pl.col("digi_contract_name").cast(pl.Categorical),
+                pl.col("strike").cast(pl.UInt32),
+                pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
+                pl.col("digi_px").cast(pl.UInt8),
+                pl.col("delta").cast(pl.Float32),
+                pl.col("implied_vol").cast(pl.Float32),
+                pl.col("btc_close").cast(pl.Float32),
+                pl.col("volume").cast(pl.UInt32),
+            ]
+        )
 
         n_before = len(final_df)
-        valid_df = final_df.filter(pl.col("volume") > 0).drop_nulls(subset=["implied_vol"])
+        valid_df = final_df.filter(pl.col("volume") > 0).drop_nulls(
+            subset=["implied_vol"]
+        )
         n_dropped = n_before - len(valid_df)
         if n_dropped:
             logger.info("Dropped %d rows with null/invalid IV", n_dropped)
 
-        group_counts = valid_df.group_by(["trade_date", "snapshot"]).agg(pl.len().alias("n_valid"))
+        group_counts = valid_df.group_by(["trade_date", "snapshot"]).agg(
+            pl.len().alias("n_valid")
+        )
         thin = group_counts.filter(pl.col("n_valid") < _MIN_VALID_STRIKES)
         if len(thin):
             logger.info(
                 "Dropping %d (trade_date, snapshot) groups with < %d strikes",
-                len(thin), _MIN_VALID_STRIKES,
+                len(thin),
+                _MIN_VALID_STRIKES,
             )
-            sufficient = group_counts.filter(pl.col("n_valid") >= _MIN_VALID_STRIKES).select(
-                ["trade_date", "snapshot"]
+            sufficient = group_counts.filter(
+                pl.col("n_valid") >= _MIN_VALID_STRIKES
+            ).select(["trade_date", "snapshot"])
+            valid_df = valid_df.join(
+                sufficient, on=["trade_date", "snapshot"], how="inner"
             )
-            valid_df = valid_df.join(sufficient, on=["trade_date", "snapshot"], how="inner")
 
         return valid_df
 

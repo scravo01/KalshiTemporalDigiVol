@@ -1,38 +1,33 @@
 import logging
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
-import seaborn as sns
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 — registers 3D projection
 from scipy import stats
-from scipy.interpolate import griddata
 
 logger = logging.getLogger(__name__)
 
-SILVER_PATH = Path("data/silver/contracts.parquet")
-SURFACE_PATH = Path("data/silver/vol_surface.parquet")
-GOLD_DIR = Path("data/gold")
-PLOTS_DIR = GOLD_DIR / "plots"
-STATS_PATH = GOLD_DIR / "summary_stats.csv"
+SILVER_PATH   = Path("data/silver/contracts.parquet")
+SURFACE_PATH  = Path("data/silver/vol_surface.parquet")
+GOLD_DIR      = Path("data/gold")
+FEATURES_PATH = GOLD_DIR / "features.parquet"
+STATS_PATH    = GOLD_DIR / "summary_stats.csv"
 
 IV_MIN = 0.20
 IV_MAX = 5.00
-_SNAPSHOT_ORDER = [f"T-{i}" for i in range(11, 0, -1)] + ["T0"] + [f"T+{i}" for i in range(1, 13)]
+_SNAPSHOT_ORDER = (
+    [f"T-{i}" for i in range(11, 0, -1)] + ["T0"] + [f"T+{i}" for i in range(1, 13)]
+)
 _SNAP_TO_IDX = {s: i for i, s in enumerate(_SNAPSHOT_ORDER)}
 
 
 def run() -> None:
-    df = _load_silver()
+    df          = _load_silver()
     features_df = _compute_features(df)
-    stats_df = _compute_stats(features_df)
+    stats_df    = _compute_stats(features_df)
     _save_stats(stats_df)
-    _save_plots(features_df)
-    if SURFACE_PATH.exists():
-        surface_df = pl.read_parquet(SURFACE_PATH)
-        _save_vol_surface_plots(surface_df)
-    logger.info("Gold ETL complete")
+    _save_features(features_df)
+    logger.info("Gold ETL complete — features and stats written to %s", GOLD_DIR)
 
 
 def _load_silver() -> pl.DataFrame:
@@ -40,13 +35,27 @@ def _load_silver() -> pl.DataFrame:
         raise FileNotFoundError(f"Silver file missing: {SILVER_PATH}")
     df = pl.read_parquet(SILVER_PATH)
     n_before = len(df)
-    df = df.filter((pl.col("implied_vol") >= IV_MIN) & (pl.col("implied_vol") <= IV_MAX))
-    logger.info(f"Loaded {len(df)} silver rows after IV sanity filter ({n_before - len(df)} dropped)")
+    df = df.filter(
+        (pl.col("implied_vol") >= IV_MIN) & (pl.col("implied_vol") <= IV_MAX)
+    )
+    logger.info(
+        "Loaded %d silver rows after IV sanity filter (%d dropped)",
+        len(df), n_before - len(df),
+    )
     return df
 
 
 def _compute_features(df: pl.DataFrame) -> pl.DataFrame:
-    # ATM: row with delta closest to 0.5 per (trade_date, snapshot)
+    # Snapshot-level metadata (snapshot_ts = earliest bar; expiry_time is constant per group)
+    meta_df = (
+        df.group_by(["trade_date", "snapshot"])
+        .agg([
+            pl.col("snapshot_ts").min().alias("snapshot_ts"),
+            pl.col("expiry_time").first().alias("expiry_time"),
+        ])
+    )
+
+    # ATM: delta closest to 0.5
     atm_df = (
         df.with_columns((pl.col("delta") - 0.5).abs().alias("_dist_atm"))
         .sort(["trade_date", "snapshot", "_dist_atm"])
@@ -77,199 +86,81 @@ def _compute_features(df: pl.DataFrame) -> pl.DataFrame:
         .select(["trade_date", "snapshot", pl.col("implied_vol").alias("iv_minus25")])
     )
 
-    n_strikes = (
-        df.group_by(["trade_date", "snapshot"])
-        .agg(pl.len().alias("n_valid_strikes"))
+    n_strikes = df.group_by(["trade_date", "snapshot"]).agg(
+        pl.len().alias("n_valid_strikes")
     )
 
     features_df = (
         atm_df
-        .join(plus25_df, on=["trade_date", "snapshot"])
+        .join(plus25_df,  on=["trade_date", "snapshot"])
         .join(minus25_df, on=["trade_date", "snapshot"])
-        .join(n_strikes, on=["trade_date", "snapshot"])
-        .with_columns(
-            ((pl.col("iv_plus25") - pl.col("iv_minus25")) / pl.col("atm_iv"))
-            .alias("skew_25d")
-        )
+        .join(n_strikes,  on=["trade_date", "snapshot"])
+        .join(meta_df,    on=["trade_date", "snapshot"])
+        .with_columns([
+            ((pl.col("iv_plus25") - pl.col("iv_minus25")) / pl.col("atm_iv")).alias("skew_25d"),
+            pl.col("expiry_time").dt.hour().cast(pl.Int8).alias("expiry_hour"),
+        ])
         .select([
-            "trade_date", "snapshot", "atm_iv", "skew_25d",
+            "trade_date", "snapshot", "snapshot_ts", "expiry_time", "expiry_hour",
+            "atm_iv", "iv_plus25", "iv_minus25", "skew_25d",
             "atm_strike", "n_valid_strikes", "btc_close",
         ])
-        .sort(["trade_date", pl.col("snapshot").cast(pl.Utf8)])
+        .sort(["trade_date", "expiry_hour"])
     )
-    logger.info(f"Computed features for {len(features_df)} (trade_date, snapshot) pairs")
+    logger.info(
+        "Computed features for %d (trade_date, snapshot) pairs", len(features_df)
+    )
     return features_df
 
 
 def _compute_stats(features_df: pl.DataFrame) -> pl.DataFrame:
     results = []
-
     for feature in ("atm_iv", "skew_25d"):
-        wide = features_df.pivot(index="trade_date", on="snapshot", values=feature)
+        wide    = features_df.pivot(index="trade_date", on="snapshot", values=feature)
         present = [s for s in _SNAPSHOT_ORDER if s in wide.columns]
-
-        consecutive_pairs = [
-            (a, b) for a, b in zip(present, present[1:])
-        ]
-        for a, b in consecutive_pairs:
-            # Use only dates where both snapshots are non-null
+        for a, b in zip(present, present[1:]):
             pair = wide.select(["trade_date", a, b]).drop_nulls()
             if len(pair) < 5:
                 logger.warning(
-                    f"Only {len(pair)} days for {feature} {b}-{a} — skipping"
+                    "Only %d days for %s %s-%s — skipping", len(pair), feature, b, a
                 )
                 continue
             delta = (pair[b] - pair[a]).to_numpy()
             results.append(_run_tests(delta, feature, f"{b}-{a}"))
-
     return pl.DataFrame(results)
 
 
 def _run_tests(delta: np.ndarray, feature: str, shift: str) -> dict:
     t_stat, p_value = stats.ttest_1samp(delta, 0.0)
     nonzero = delta[delta != 0]
-    if len(nonzero) < 2:
-        p_wilcox = float("nan")
-    else:
-        _, p_wilcox = stats.wilcoxon(nonzero, alternative="two-sided")
+    p_wilcox = float("nan") if len(nonzero) < 2 else float(
+        stats.wilcoxon(nonzero, alternative="two-sided")[1]
+    )
     mean_shift = float(np.mean(delta))
-    std = float(np.std(delta, ddof=1))
-    cohens_d = mean_shift / std if std > 0 else float("nan")
+    std        = float(np.std(delta, ddof=1))
+    cohens_d   = mean_shift / std if std > 0 else float("nan")
     return {
-        "feature": feature,
-        "shift": shift,
+        "feature":    feature,
+        "shift":      shift,
         "mean_shift": round(mean_shift, 6),
-        "std": round(std, 6),
-        "t_stat": round(float(t_stat), 4),
-        "p_value": round(float(p_value), 6),
+        "std":        round(std, 6),
+        "t_stat":     round(float(t_stat), 4),
+        "p_value":    round(float(p_value), 6),
         "p_wilcoxon": round(float(p_wilcox), 6),
-        "cohens_d": round(cohens_d, 4),
-        "n_days": len(delta),
+        "cohens_d":   round(cohens_d, 4),
+        "n_days":     len(delta),
     }
 
 
 def _save_stats(stats_df: pl.DataFrame) -> None:
     GOLD_DIR.mkdir(parents=True, exist_ok=True)
     stats_df.write_csv(STATS_PATH)
-    logger.info(f"Saved summary stats → {STATS_PATH}")
+    logger.info("Saved summary stats → %s", STATS_PATH)
 
 
-def _save_plots(features_df: pl.DataFrame) -> None:
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-    data = features_df.to_pandas()
-
-    for col, title, ylabel in [
-        ("atm_iv", "ATM Implied Vol at Three Snapshots", "ATM IV (annualised)"),
-        ("skew_25d", "25Δ Skew at Three Snapshots", "Skew (IV+25Δ − IV−25Δ) / ATM IV"),
-    ]:
-        fig, ax = plt.subplots(figsize=(11, 5))
-        sns.boxplot(data=data, x="snapshot", y=col, order=_SNAPSHOT_ORDER, ax=ax)
-        ax.set_title(title)
-        ax.set_xlabel("Snapshot")
-        ax.set_ylabel(ylabel)
-        fig.tight_layout()
-        out = PLOTS_DIR / f"{col}_boxplot.png"
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        logger.info(f"Saved plot → {out}")
-
-
-def _save_vol_surface_plots(surface_df: pl.DataFrame) -> None:
-    """Generate 3D implied-vol surface plots from minute-by-minute vol surface data."""
-    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Compute log-moneyness = ln(K/S) for every row
-    surface_df = surface_df.with_columns(
-        (pl.col("strike").cast(pl.Float64) / pl.col("btc_close").cast(pl.Float64))
-        .log()
-        .alias("log_moneyness")
+def _save_features(features_df: pl.DataFrame) -> None:
+    GOLD_DIR.mkdir(parents=True, exist_ok=True)
+    features_df.write_parquet(FEATURES_PATH, compression="zstd", compression_level=3)
+    logger.info(
+        "Saved %d feature rows → %s", len(features_df), FEATURES_PATH
     )
-
-    LM_STEP = 0.005  # bucket size for log-moneyness axis
-
-    surface_df = surface_df.with_columns(
-        ((pl.col("log_moneyness") / LM_STEP).round() * LM_STEP).alias("lm_bucket")
-    ).filter(pl.col("implied_vol").is_not_null() & pl.col("lm_bucket").is_not_null())
-
-    # ── Plot 1: Cross-session surface ─────────────────────────────────────────
-    # Use first bars (minutes_to_expiry >= 55) to approximate the window-open price.
-    first_bars = surface_df.filter(pl.col("minutes_to_expiry") >= 55)
-    agg_cross = (
-        first_bars
-        .filter(pl.col("snapshot").cast(pl.Utf8).is_in(_SNAPSHOT_ORDER))
-        .group_by(["snapshot", "lm_bucket"])
-        .agg(pl.col("implied_vol").median().alias("iv_med"))
-        .filter(pl.col("iv_med").is_not_null())
-    )
-
-    if len(agg_cross) >= 10:
-        snaps = agg_cross["snapshot"].cast(pl.Utf8).to_list()
-        xs = np.array([_SNAP_TO_IDX[s] for s in snaps], dtype=float)
-        ys = np.array(agg_cross["lm_bucket"].to_list(), dtype=float)
-        zs = np.array(agg_cross["iv_med"].to_list(), dtype=float)
-
-        xi = np.arange(len(_SNAPSHOT_ORDER), dtype=float)
-        yi = np.linspace(ys.min(), ys.max(), 30)
-        Xi, Yi = np.meshgrid(xi, yi)
-        Zi = griddata((xs, ys), zs, (Xi, Yi), method="linear")
-
-        fig = plt.figure(figsize=(14, 7))
-        ax = fig.add_subplot(111, projection="3d")
-        surf = ax.plot_surface(Xi, Yi, Zi, cmap="viridis", alpha=0.85, edgecolor="none")
-        fig.colorbar(surf, ax=ax, shrink=0.5, label="Implied Vol")
-        ax.set_xlabel("Session snapshot", labelpad=10)
-        ax.set_ylabel("Log moneyness  ln(K/S)", labelpad=10)
-        ax.set_zlabel("Implied vol", labelpad=8)
-        ax.set_title("BTC Digital Options — Vol Surface Across Sessions", pad=14)
-        tick_positions = list(range(0, len(_SNAPSHOT_ORDER), 4))
-        ax.set_xticks(tick_positions)
-        ax.set_xticklabels([_SNAPSHOT_ORDER[i] for i in tick_positions], fontsize=7)
-        ax.view_init(elev=25, azim=-60)
-        fig.tight_layout()
-        out = PLOTS_DIR / "vol_surface_cross_session.png"
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        logger.info("Saved vol surface cross-session plot → %s", out)
-    else:
-        logger.warning("Insufficient data for cross-session vol surface (%d rows)", len(agg_cross))
-
-    # ── Plot 2: Intraday smile evolution per key snapshot ─────────────────────
-    _KEY_SNAPS = ["T-3", "T-2", "T-1", "T0", "T+1", "T+2", "T+3"]
-
-    for snap in _KEY_SNAPS:
-        snap_df = surface_df.filter(pl.col("snapshot").cast(pl.Utf8) == snap)
-        agg_intra = (
-            snap_df
-            .group_by(["minutes_to_expiry", "lm_bucket"])
-            .agg(pl.col("implied_vol").median().alias("iv_med"))
-            .filter(pl.col("iv_med").is_not_null())
-        )
-
-        if len(agg_intra) < 15:
-            logger.warning("Insufficient data for intraday surface %s (%d rows)", snap, len(agg_intra))
-            continue
-
-        xs2 = np.array(agg_intra["minutes_to_expiry"].cast(pl.Float64).to_list(), dtype=float)
-        ys2 = np.array(agg_intra["lm_bucket"].to_list(), dtype=float)
-        zs2 = np.array(agg_intra["iv_med"].to_list(), dtype=float)
-
-        xi2 = np.linspace(xs2.min(), xs2.max(), min(int(xs2.max() - xs2.min()) + 1, 60))
-        yi2 = np.linspace(ys2.min(), ys2.max(), 30)
-        Xi2, Yi2 = np.meshgrid(xi2, yi2)
-        Zi2 = griddata((xs2, ys2), zs2, (Xi2, Yi2), method="linear")
-
-        fig = plt.figure(figsize=(12, 7))
-        ax = fig.add_subplot(111, projection="3d")
-        surf2 = ax.plot_surface(Xi2, Yi2, Zi2, cmap="plasma", alpha=0.85, edgecolor="none")
-        fig.colorbar(surf2, ax=ax, shrink=0.5, label="Implied Vol")
-        ax.set_xlabel("Minutes to expiry", labelpad=10)
-        ax.set_ylabel("Log moneyness  ln(K/S)", labelpad=10)
-        ax.set_zlabel("Implied vol", labelpad=8)
-        ax.set_title(f"Intraday Vol Smile Evolution — {snap}", pad=14)
-        ax.view_init(elev=25, azim=-60)
-        fig.tight_layout()
-        safe_snap = snap.replace("+", "plus").replace("-", "minus")
-        out = PLOTS_DIR / f"vol_surface_intraday_{safe_snap}.png"
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        logger.info("Saved intraday vol surface %s → %s", snap, out)

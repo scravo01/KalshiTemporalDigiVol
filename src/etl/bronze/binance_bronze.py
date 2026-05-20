@@ -31,16 +31,24 @@ class BinanceBronzeETL(BaseETL):
 
     async def extract(self) -> pl.DataFrame:
         # Extend window to cover T-1 (23:00 prior day) and T+1 (01:00 next day)
-        start_dt = (
-            datetime(self.start_date.year, self.start_date.month, self.start_date.day,
-                     22, 0, 0, tzinfo=timezone.utc)
-            - timedelta(days=1)
-        )
-        end_dt = (
-            datetime(self.end_date.year, self.end_date.month, self.end_date.day,
-                     2, 0, 0, tzinfo=timezone.utc)
-            + timedelta(days=1)
-        )
+        start_dt = datetime(
+            self.start_date.year,
+            self.start_date.month,
+            self.start_date.day,
+            22,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        ) - timedelta(days=1)
+        end_dt = datetime(
+            self.end_date.year,
+            self.end_date.month,
+            self.end_date.day,
+            2,
+            0,
+            0,
+            tzinfo=timezone.utc,
+        ) + timedelta(days=1)
         logger.info("Binance bronze extract: %s → %s", start_dt, end_dt)
         return await self.client.fetch_klines(start_dt, end_dt)
 

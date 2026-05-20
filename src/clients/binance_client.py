@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import ClassVar, Optional
 
 import aiohttp
 import polars as pl
@@ -11,13 +11,15 @@ logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.binance.us"
 _KLINES_LIMIT = 1000
-_RATE_LIMIT = 20          # requests per second (well within Binance's 1 200/min)
+_RATE_LIMIT = 20  # requests per second (well within Binance's 1 200/min)
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 
 class BinanceClient:
-    def __init__(self) -> None:
-        self._session: Optional[aiohttp.ClientSession] = None
+    _limiter: ClassVar[AsyncLimiter] = AsyncLimiter(_RATE_LIMIT, 1.0)
+
+    def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
+        self._session = session
 
     def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -29,12 +31,11 @@ class BinanceClient:
         rows: list[dict] = []
         current_ms = int(start_dt.timestamp() * 1000)
         end_ms = int(end_dt.timestamp() * 1000)
-        limiter = AsyncLimiter(_RATE_LIMIT, 1.0)
         session = self._get_session()
 
         with atqdm(desc="Binance klines", unit=" pages") as pbar:
             while current_ms < end_ms:
-                async with limiter:
+                async with self._limiter:
                     async with session.get(
                         f"{BASE_URL}/api/v3/klines",
                         params={
@@ -51,11 +52,13 @@ class BinanceClient:
                     break
                 for bar in batch:
                     ts_s = int(bar[0]) // 1000
-                    rows.append({
-                        "timestamp": ts_s,
-                        "close": float(bar[4]),
-                        "ingested_at": ingested_at,
-                    })
+                    rows.append(
+                        {
+                            "timestamp": ts_s,
+                            "close": float(bar[4]),
+                            "ingested_at": ingested_at,
+                        }
+                    )
                 pbar.update(1)
                 last_ts_ms = int(batch[-1][0])
                 if len(batch) < _KLINES_LIMIT or last_ts_ms >= end_ms:
@@ -64,19 +67,25 @@ class BinanceClient:
 
         if not rows:
             logger.warning("fetch_klines returned 0 rows")
-            return pl.DataFrame(schema={
-                "timestamp": pl.Datetime("us", "UTC"),
-                "close": pl.Float32,
-                "ingested_at": pl.Datetime("us", "UTC"),
-            })
+            return pl.DataFrame(
+                schema={
+                    "timestamp": pl.Datetime("us", "UTC"),
+                    "close": pl.Float32,
+                    "ingested_at": pl.Datetime("us", "UTC"),
+                }
+            )
 
-        df = pl.DataFrame(rows).with_columns([
-            (pl.col("timestamp").cast(pl.Int64) * 1_000_000)
-            .cast(pl.Datetime("us"))
-            .dt.replace_time_zone("UTC")
-            .alias("timestamp"),
-            pl.col("close").cast(pl.Float32),
-            pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
-        ])
-        logger.info("fetch_klines: %d rows (%s → %s)", len(df), start_dt.date(), end_dt.date())
+        df = pl.DataFrame(rows).with_columns(
+            [
+                (pl.col("timestamp").cast(pl.Int64) * 1_000_000)
+                .cast(pl.Datetime("us"))
+                .dt.replace_time_zone("UTC")
+                .alias("timestamp"),
+                pl.col("close").cast(pl.Float32),
+                pl.col("ingested_at").cast(pl.Datetime("us", "UTC")),
+            ]
+        )
+        logger.info(
+            "fetch_klines: %d rows (%s → %s)", len(df), start_dt.date(), end_dt.date()
+        )
         return df
