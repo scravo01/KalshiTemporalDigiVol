@@ -244,7 +244,7 @@ class KalshiClient:
             logger.warning("fetch_markets returned 0 rows")
             return _empty_markets_df()
 
-        return pl.DataFrame(rows).with_columns(
+        return pl.DataFrame(rows, infer_schema_length=None).with_columns(
             [
                 pl.col("ticker").cast(pl.Categorical),
                 pl.col("trade_date").cast(pl.Date),
