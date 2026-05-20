@@ -6,7 +6,7 @@ Reference documentation for the KalshiTemporalDigiVol research pipeline.
 
 | Document | Description |
 |----------|-------------|
-| [investment_research.md](investment_research.md) | Full strategy research memo — vol premium analysis, backtest results (all-hours and Asia-session), risk factors, and next steps |
+| [../investment_research.md](../investment_research.md) | Full strategy research memo — vol premium analysis, backtest results (all-hours and Asia-session), risk factors, and next steps |
 
 ## Architecture & Entry Points
 

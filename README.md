@@ -29,7 +29,7 @@ Research pipeline and backtesting framework for BTC digital options on Kalshi. T
 
 Bootstrap validation (1,000 × 50% subsamples): P5 Sharpe 3.99, 100% of subsamples profitable.
 
-See [`docs/investment_research.md`](docs/investment_research.md) for the full research memo.
+See [`investment_research.md`](investment_research.md) for the full research memo.
 
 ---
 
@@ -170,7 +170,7 @@ Component-level documentation lives in [`docs/`](docs/). Key references:
 
 | Doc | Description |
 |-----|-------------|
-| [`docs/investment_research.md`](docs/investment_research.md) | Full strategy research memo with tables and conclusions |
+| [`investment_research.md`](investment_research.md) | Full strategy research memo with tables and conclusions |
 | [`docs/airflow.md`](docs/airflow.md) | Airflow + Docker setup and DAG overview |
 | [`docs/architecture.md`](docs/architecture.md) | Medallion pipeline data flow and layer contracts |
 | [`docs/implied_vol.md`](docs/implied_vol.md) | Digital Black-Scholes IV inversion derivation |
