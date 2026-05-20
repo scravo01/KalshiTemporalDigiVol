@@ -3,7 +3,7 @@ import math
 import pytest
 from scipy.stats import norm
 
-from src.etl.silver.implied_vol import PRICE_MAX, PRICE_MIN, compute_t, invert_iv
+from src.etl.silver.implied_vol import PRICE_MAX, PRICE_MIN, invert_iv
 
 _T0 = 21 / 8760  # standard T for most tests
 
@@ -99,14 +99,3 @@ class TestRoundTrip:
         assert sigma is not None
         repriced = _reprice(sigma, 95_000.0, 96_000.0, expected_t)
         assert abs(repriced - p_cents) < 0.01
-
-
-class TestComputeT:
-    def test_t_minus1(self):
-        assert abs(compute_t("T-1") - 22 / 8760) < 1e-12
-
-    def test_t0(self):
-        assert abs(compute_t("T0") - 21 / 8760) < 1e-12
-
-    def test_t_plus1(self):
-        assert abs(compute_t("T+1") - 20 / 8760) < 1e-12

@@ -8,9 +8,6 @@ PRICE_MIN = 2
 PRICE_MAX = 98
 ATM_TOL = 0.001  # |ln(S/K)| below this → ATM path (brentq)
 
-_T_VALUES = {"T-1": 22 / 8760, "T0": 21 / 8760, "T+1": 20 / 8760}
-
-
 def invert_iv(p: float, S: float, K: float, T: float) -> Optional[float]:
     """
     Invert digital Black-Scholes to recover implied vol.
@@ -74,8 +71,3 @@ def invert_iv(p: float, S: float, K: float, T: float) -> Optional[float]:
         return None
 
     return float(u / math.sqrt(T))
-
-
-def compute_t(snapshot: str) -> float:
-    """Return time-to-expiry in years for each snapshot label."""
-    return _T_VALUES[snapshot]

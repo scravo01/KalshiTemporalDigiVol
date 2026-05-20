@@ -166,7 +166,7 @@ class SilverETL(BaseETL):
 
         result_df = raw.with_columns(
             [
-                (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
+                (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("prob_itm"),
                 pl.Series("implied_vol", iv_vals, dtype=pl.Float64).alias(
                     "implied_vol"
                 ),
@@ -182,7 +182,7 @@ class SilverETL(BaseETL):
                 pl.col("strike").cast(pl.UInt32),
                 pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
                 pl.col("digi_px").cast(pl.UInt8),
-                pl.col("delta").cast(pl.Float32),
+                pl.col("prob_itm").cast(pl.Float32),
                 pl.col("implied_vol").cast(pl.Float32),
                 pl.col("btc_close").cast(pl.Float32),
                 pl.col("volume").cast(pl.UInt32),

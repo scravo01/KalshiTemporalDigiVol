@@ -163,7 +163,7 @@ if len(smile_data) > 0:
     fig, ax = plt.subplots(figsize=(8, 4))
     strikes = smile_data["strike"].to_list()
     ivs = (smile_data["implied_vol"] * 100).to_list()
-    deltas = smile_data["delta"].to_list()
+    deltas = smile_data["prob_itm"].to_list()
     ax.plot(strikes, ivs, marker="o", linewidth=1.5)
     ax.set_xlabel("Strike ($)")
     ax.set_ylabel("IV (%)")

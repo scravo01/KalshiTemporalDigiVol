@@ -141,7 +141,7 @@ class VolSurfaceETL(BaseETL):
         result = raw.with_columns(
             [
                 pl.Series("minutes_to_expiry", mins_to_expiry, dtype=pl.UInt8),
-                (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("delta"),
+                (pl.col("digi_px").cast(pl.Float32) / 100.0).alias("prob_itm"),
                 pl.Series("implied_vol", iv_vals, dtype=pl.Float64).cast(pl.Float32),
             ]
         )
@@ -156,7 +156,7 @@ class VolSurfaceETL(BaseETL):
                 pl.col("strike").cast(pl.UInt32),
                 pl.col("expiry_time").cast(pl.Datetime("us", "UTC")),
                 pl.col("digi_px").cast(pl.UInt8),
-                pl.col("delta").cast(pl.Float32),
+                pl.col("prob_itm").cast(pl.Float32),
                 pl.col("implied_vol").cast(pl.Float32),
                 pl.col("btc_close").cast(pl.Float32),
             ]
@@ -166,6 +166,15 @@ class VolSurfaceETL(BaseETL):
         if n_null_iv:
             logger.info("Dropping %d rows with null implied_vol", n_null_iv)
         final = final.filter(pl.col("implied_vol").is_not_null())
+
+        _IV_MAX = 5.0
+        n_before_cap = len(final)
+        final = final.filter(pl.col("implied_vol") <= _IV_MAX)
+        if (n_capped := n_before_cap - len(final)):
+            logger.info(
+                "Dropped %d rows with IV > %.1f (outlier cap; %.1f%% of data)",
+                n_capped, _IV_MAX, 100 * n_capped / n_before_cap,
+            )
 
         logger.info("Vol surface transform complete: %d rows", len(final))
         return final

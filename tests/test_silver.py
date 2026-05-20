@@ -17,7 +17,7 @@ def silver_df(bronze_dir: Path) -> pl.DataFrame:
 class TestSilverSchema:
     EXPECTED_COLS = {
         "trade_date", "snapshot", "snapshot_ts", "digi_contract_name",
-        "strike", "expiry_time", "digi_px", "delta", "implied_vol",
+        "strike", "expiry_time", "digi_px", "prob_itm", "implied_vol",
         "btc_close", "volume",
     }
 
@@ -39,8 +39,8 @@ class TestSilverSchema:
     def test_expiry_time_is_datetime(self, silver_df):
         assert silver_df["expiry_time"].dtype == pl.Datetime("us", "UTC")
 
-    def test_delta_is_float32(self, silver_df):
-        assert silver_df["delta"].dtype == pl.Float32
+    def test_prob_itm_is_float32(self, silver_df):
+        assert silver_df["prob_itm"].dtype == pl.Float32
 
 
 _ALL_SNAPSHOTS = (
@@ -55,13 +55,13 @@ class TestSilverContent:
         snaps = set(silver_df["snapshot"].cast(pl.Utf8).unique().to_list())
         assert snaps == _ALL_SNAPSHOTS
 
-    def test_delta_values_in_range(self, silver_df):
-        assert (silver_df["delta"] >= 0.02).all()
-        assert (silver_df["delta"] <= 0.98).all()
+    def test_prob_itm_values_in_range(self, silver_df):
+        assert (silver_df["prob_itm"] >= 0.02).all()
+        assert (silver_df["prob_itm"] <= 0.98).all()
 
-    def test_delta_equals_digi_px_over_100(self, silver_df):
+    def test_prob_itm_equals_digi_px_over_100(self, silver_df):
         expected = silver_df["digi_px"].cast(pl.Float32) / 100.0
-        assert ((silver_df["delta"] - expected).abs() < 1e-4).all()
+        assert ((silver_df["prob_itm"] - expected).abs() < 1e-4).all()
 
     def test_btc_close_matches_binance(self, silver_df):
         t0 = silver_df.filter(pl.col("snapshot").cast(pl.Utf8) == "T0")

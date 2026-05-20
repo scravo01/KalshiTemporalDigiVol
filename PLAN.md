@@ -49,34 +49,41 @@ Invert numerically using Brent's method (`scipy.optimize.brentq`). Filter out co
 ## Repository Structure
 
 ```
-btc-kalshi-asia-vol/
+KalshiTemporalDigiVol/
 ├── data/
-│   ├── bronze/                         # raw API data, minimal transformation
-│   │   ├── kalshi_markets.parquet      # market metadata — ticker, strike, expiry
-│   │   ├── kalshi_candles.parquet      # 1min candlesticks for all tickers
-│   │   └── binance_btc_1m.parquet      # BTC spot 1min OHLCV
-│   ├── silver/                         # analysis-ready features
-│   │   └── snapshot_features.parquet   # (date, snapshot, atm_iv, skew_25d)
-│   └── gold/                           # presentation-ready outputs
-│       ├── summary_stats.csv           # statistical test results
-│       └── plots/                      # saved chart images
+│   ├── bronze/                              # raw API data, partitioned by date
+│   │   ├── kalshi_markets_<date>.parquet    # market metadata — ticker, strike, expiry
+│   │   ├── kalshi_candles_<date>.parquet    # 1min candlesticks for all tickers
+│   │   └── binance_btc_1m.parquet           # BTC spot 1min OHLCV
+│   ├── silver/                              # analysis-ready features
+│   │   ├── contracts.parquet                # (date, snapshot, strike, implied_vol, prob_itm, ...)
+│   │   └── vol_surface.parquet              # full 60-min window per expiry (123k rows)
+│   └── gold/                               # presentation-ready outputs
+│       ├── features.parquet                 # (trade_date, expiry_hour, atm_iv, skew_25d, ...)
+│       ├── rv_iv.parquet                    # 5-min realized vol vs ATM IV
+│       ├── summary_stats.csv                # statistical test results
+│       └── plots/                           # saved chart images
 ├── src/
 │   ├── clients/
-│   │   ├── kalshi_client.py            # Kalshi API calls — returns polars DataFrames
-│   │   └── binance_client.py           # Binance API calls — returns polars DataFrames
+│   │   ├── kalshi_client.py                 # Kalshi API — RSA-PSS auth, rate-limited
+│   │   └── binance_client.py                # Binance API — returns polars DataFrames
 │   └── etl/
 │       ├── bronze/
-│       │   ├── kalshi_bronze.py        # extract Kalshi → data/bronze/
-│       │   └── binance_bronze.py       # extract Binance → data/bronze/
+│       │   ├── kalshi_bronze.py             # extract Kalshi → data/bronze/
+│       │   └── binance_bronze.py            # extract Binance → data/bronze/
 │       ├── silver/
-│       │   ├── implied_vol.py          # digital BS inversion logic
-│       │   └── features_silver.py      # bronze → snapshot features → data/silver/
+│       │   ├── implied_vol.py               # digital BS IV inversion
+│       │   ├── silver_etl.py                # bronze → snapshot features → contracts.parquet
+│       │   └── vol_surface_etl.py           # bronze → full vol surface → vol_surface.parquet
 │       └── gold/
-│           └── results_gold.py         # silver → stats + plots → data/gold/
+│           ├── gold_etl.py                  # silver → ATM IV features + stats → data/gold/
+│           └── rv_iv_analysis.py            # realized vol vs implied vol analysis
 ├── notebooks/
-│   └── 01_asia_vol_shift.ipynb         # end-to-end research narrative (optional)
-├── run_pipeline.py                     # single entrypoint: bronze → silver → gold
-├── requirements.txt
+│   ├── vol_research.ipynb                   # research narrative: vol premium, skew, Asia open
+│   ├── backtest_01_all_hours.ipynb          # delta-hedged short-vol, all 24 hours
+│   └── backtest_02_asia_hours.ipynb         # same strategy, Asia session only
+├── run_pipeline.py                          # thin shim → `kvol pipeline`
+├── pyproject.toml
 └── README.md
 ```
 

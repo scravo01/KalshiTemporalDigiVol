@@ -57,7 +57,7 @@ def _compute_features(df: pl.DataFrame) -> pl.DataFrame:
 
     # ATM: delta closest to 0.5
     atm_df = (
-        df.with_columns((pl.col("delta") - 0.5).abs().alias("_dist_atm"))
+        df.with_columns((pl.col("prob_itm") - 0.5).abs().alias("_dist_atm"))
         .sort(["trade_date", "snapshot", "_dist_atm"])
         .group_by(["trade_date", "snapshot"], maintain_order=True)
         .first()
@@ -70,7 +70,7 @@ def _compute_features(df: pl.DataFrame) -> pl.DataFrame:
 
     # +25Δ: delta closest to 0.75
     plus25_df = (
-        df.with_columns((pl.col("delta") - 0.75).abs().alias("_dist"))
+        df.with_columns((pl.col("prob_itm") - 0.75).abs().alias("_dist"))
         .sort(["trade_date", "snapshot", "_dist"])
         .group_by(["trade_date", "snapshot"], maintain_order=True)
         .first()
@@ -79,7 +79,7 @@ def _compute_features(df: pl.DataFrame) -> pl.DataFrame:
 
     # −25Δ: delta closest to 0.25
     minus25_df = (
-        df.with_columns((pl.col("delta") - 0.25).abs().alias("_dist"))
+        df.with_columns((pl.col("prob_itm") - 0.25).abs().alias("_dist"))
         .sort(["trade_date", "snapshot", "_dist"])
         .group_by(["trade_date", "snapshot"], maintain_order=True)
         .first()
