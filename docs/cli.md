@@ -131,10 +131,9 @@ uv run kvol pipeline \
 3. `SilverETL.run()` — reads all bronze parquets
 4. `gold_run()` — reads silver parquet
 
-## Alternative Entry Points
+## Entry Point
 
-- `run_pipeline.py` at the repo root is a thin shim that calls `uv run kvol pipeline`. It exists for convenience but carries no logic.
-- `main.py` at the repo root (if present) delegates identically.
+All pipeline stages are invoked via `uv run kvol <command>`. The `kvol` entry point is registered in `pyproject.toml` and points to `src.cli.main:main`.
 
 ## Gotchas
 

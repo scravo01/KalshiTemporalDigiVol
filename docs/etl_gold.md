@@ -133,7 +133,7 @@ The research question is whether ATM IV or 25Δ skew shifts at the Asian open (0
 - `T0-T-1`: change from the hour before Asian open to the Asian open hour
 - `T+1-T0`: change in the first hour after Asian open
 
-**Success criteria** (from `PLAN.md`):
+**Success criteria**:
 - ATM IV shift p-value < 0.05
 - Effect size (Cohen's d) > 0.3
 - 25Δ skew shift consistency: > 55% of days move in same direction

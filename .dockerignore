@@ -1,0 +1,11 @@
+.git/
+.venv/
+__pycache__/
+*.pyc
+.idea/
+.DS_Store
+data/bronze/
+data/silver/
+data/gold/
+notebooks/
+.ruff_cache/

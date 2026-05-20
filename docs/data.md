@@ -2,16 +2,19 @@
 
 ## Overview
 
-Three bronze parquet files feed the pipeline. All timestamps are UTC. Only **closing prices** are stored — open/high/low are not needed since IV inversion uses a single well-defined price per snapshot minute.
+All timestamps are UTC throughout the pipeline. Only closing prices are stored — open/high/low are not needed since IV inversion uses a single well-defined price per bar. All parquet files use **zstd level 3** compression.
 
-**Estimated sizes (60-day window):**
+**Approximate sizes (61-day window):**
 
 | File | Rows | Parquet (zstd) |
-|---|---|---|
-| `data/bronze/binance_btc_1m.parquet` | ~86,400 | ~0.5 MB |
-| `data/bronze/kalshi_markets.parquet` | ~1,260 | ~20 KB |
-| `data/bronze/kalshi_candles.parquet` | ~1.59M | ~3–5 MB |
-| `data/silver/snapshot_features.parquet` | ~180 | < 1 KB |
+|------|------|----------------|
+| `data/bronze/binance_btc_1m.parquet` | ~88,000 | ~0.5 MB |
+| `data/bronze/kalshi_markets_YYYY-MM-DD.parquet` (per date) | ~261,000 total | ~20 KB/file |
+| `data/bronze/kalshi_candles_YYYY-MM-DD.parquet` (per date) | varies | ~3–5 MB/file |
+| `data/silver/contracts.parquet` | ~45,000 | ~2 MB |
+| `data/silver/vol_surface.parquet` | ~2.5M | ~25 MB |
+| `data/gold/rv_iv.parquet` | ~17,500 | ~0.5 MB |
+| `data/gold/rv_iv_hourly.parquet` | ~1,460 | ~50 KB |
 
 ---
 
@@ -19,177 +22,154 @@ Three bronze parquet files feed the pipeline. All timestamps are UTC. Only **clo
 
 ### `data/bronze/binance_btc_1m.parquet`
 
-Source: Binance REST API — `GET /api/v3/klines`, symbol `BTCUSDT`, interval `1m`. Paginated at 1,000 bars/call (~87 calls for 60 days).
+Source: Binance US REST API — `GET /api/v3/klines`, symbol `BTCUSDT`, interval `1m`.
 
 | Column | Polars dtype | Notes |
-|---|---|---|
-| `timestamp` | `Datetime(time_unit="s", time_zone="UTC")` | Bar open time |
+|--------|-------------|-------|
+| `timestamp` | `Datetime(us, UTC)` | Bar open time |
 | `close` | `Float32` | BTC spot price at end of bar |
-| `ingested_at` | `Datetime(time_unit="s", time_zone="UTC")` | Pipeline run time |
-
-`Float32` is sufficient for BTC prices (7 significant digits covers $99,999.99 with cent precision). All other Binance kline fields (open, high, low, volume, trades) are discarded at ingest — the silver layer only needs spot price at a given timestamp.
+| `ingested_at` | `Datetime(us, UTC)` | Pipeline run time |
 
 ---
 
-### `data/bronze/kalshi_markets.parquet`
+### `data/bronze/kalshi_markets_YYYY-MM-DD.parquet`
 
-Source: Kalshi REST API — `GET /markets` (live) and `GET /historical/markets` (settled before cutoff). One row per contract per trading day.
+Source: Kalshi REST API — `GET /markets` (live) and `GET /historical/markets` (settled before cutoff). One file per trading date; partitioned this way to support incremental ingest (existing dates are skipped on re-run).
 
-**Strike selection**: 10 strikes below ATM + ATM + 10 strikes above ATM at **$500 increments**, anchored to BTC `close` price at **00:00 UTC** each day = **21 contracts/day**.
+Markets are **hourly binary options** as of 2026 (e.g., `KXBTCD-26MAY1901-T85799.99`), with ~261,000 total markets across the 61-day window.
 
 | Column | Polars dtype | Notes |
-|---|---|---|
-| `ticker` | `Categorical` | e.g. `KXBTCD-25MAY24-B95000` |
+|--------|-------------|-------|
+| `ticker` | `Categorical` | e.g. `KXBTCD-26MAY1901-T85799.99` |
 | `trade_date` | `Date` | The trading day this contract belongs to |
 | `strike` | `UInt32` | Strike price in whole dollars |
-| `expiry_time` | `Datetime(time_unit="s", time_zone="UTC")` | Always ~21:00 UTC (4pm ET) |
+| `expiry_time` | `Datetime(us, UTC)` | Contract settlement time (each UTC hour) |
 | `status` | `Categorical` | `open` or `settled` |
 | `settlement_price` | `Float32` | Null if unsettled |
-| `ingested_at` | `Datetime(time_unit="s", time_zone="UTC")` | Pipeline run time |
+| `ingested_at` | `Datetime(us, UTC)` | Pipeline run time |
 
 ---
 
-### `data/bronze/kalshi_candles.parquet`
+### `data/bronze/kalshi_candles_YYYY-MM-DD.parquet`
 
-Source: Kalshi batch candlestick API — see [Kalshi API Endpoints](#kalshi-api-endpoints) below. One call fetches up to 7 tickers simultaneously. Routes to `/historical/` endpoint for contracts older than the cutoff.
-
-Candles span **00:00 UTC → 21:00 UTC** per contract (1,260 bars max). **Zero-volume bars are dropped at ingest** — they carry no information and the silver layer only reads three snapshot minutes per day. Row count before/after is logged.
+Source: Kalshi batch candlestick API. One file per trading date. **Zero-volume bars are dropped at ingest.**
 
 | Column | Polars dtype | Notes |
-|---|---|---|
+|--------|-------------|-------|
 | `ticker` | `Categorical` | Foreign key to `kalshi_markets` |
-| `timestamp` | `Datetime(time_unit="s", time_zone="UTC")` | Bar open time |
+| `trade_date` | `Date` | Added by `KalshiBronzeETL.transform()` via join |
+| `timestamp` | `Datetime(us, UTC)` | Bar open time |
 | `close` | `UInt8` | Last trade price in cents (0–100) |
-| `volume` | `UInt32` | Contracts traded; kept for zero-volume filtering |
-| `ingested_at` | `Datetime(time_unit="s", time_zone="UTC")` | Pipeline run time |
+| `volume` | `UInt32` | Contracts traded; kept for downstream filtering |
+| `ingested_at` | `Datetime(us, UTC)` | Pipeline run time |
 
-`UInt8` is exact for Kalshi cent prices (integer 0–100); `Float64` would waste 7 bytes per cell across ~1.6M rows.
+`UInt8` is exact for Kalshi cent prices (integer 0–100); 8× smaller than Float64.
 
 ---
 
 ## Silver Layer
 
-### `data/silver/snapshot_features.parquet`
+### `data/silver/contracts.parquet`
 
-One row per `(trade_date, snapshot)`. Built by DuckDB joining `kalshi_candles` to `binance_btc_1m` on UTC timestamp, filtering to the three daily windows, then calling `implied_vol.py` per group.
+Built by `SilverETL`: DuckDB join of kalshi candles → binance spot, then IV inversion per (ticker, snapshot). One row per valid `(trade_date, snapshot, ticker)`.
 
 | Column | Polars dtype | Notes |
-|---|---|---|
+|--------|-------------|-------|
 | `trade_date` | `Date` | |
-| `snapshot` | `Categorical` | `T-1` (23:00), `T0` (00:00), `T+1` (01:00) |
-| `atm_iv` | `Float32` | Annualized, e.g. 1.2 = 120% |
-| `skew_25d` | `Float32` | `(IV(+25Δ) − IV(−25Δ)) / ATM IV` |
-| `atm_strike` | `UInt32` | Strike closest to spot at snapshot |
-| `n_valid_strikes` | `UInt8` | Strikes used; rows with < 3 are dropped |
+| `snapshot` | `Categorical` | UTC hour label, e.g. `0`, `1`, `23` |
+| `snapshot_ts` | `Datetime(us, UTC)` | Exact UTC timestamp of the snapshot bar |
+| `digi_contract_name` | `Categorical` | Kalshi ticker |
+| `strike` | `UInt32` | Strike in whole dollars |
+| `expiry_time` | `Datetime(us, UTC)` | Contract settlement time |
+| `digi_px` | `UInt8` | Mid-price in cents (0–100) |
+| `prob_itm` | `Float32` | `digi_px / 100` — probability of finishing in the money |
+| `implied_vol` | `Float32` | Annualized implied vol (digital Black-Scholes inversion) |
+| `btc_close` | `Float32` | BTC spot price at snapshot time |
+| `volume` | `UInt32` | Candle volume; rows with volume=0 are excluded |
+
+Rows with fewer than 3 valid IV strikes in a snapshot group are dropped before writing.
+
+---
+
+### `data/silver/vol_surface.parquet`
+
+Built by `VolSurfaceETL`: same join and IV inversion as `SilverETL` but computed at **every traded minute** across all 24 UTC expiry hours (not just snapshot windows). Used by `rv_iv_analysis.py`.
+
+| Column | Polars dtype | Notes |
+|--------|-------------|-------|
+| `trade_date` | `Date` | |
+| `snapshot` | `Categorical` | UTC hour of the bar (0–23) |
+| `bar_ts` | `Datetime(us, UTC)` | Exact bar timestamp |
+| `minutes_to_expiry` | `Float32` | Positive = contract still open |
+| `digi_contract_name` | `Categorical` | Kalshi ticker |
+| `strike` | `UInt32` | Strike in whole dollars |
+| `expiry_time` | `Datetime(us, UTC)` | Contract settlement time |
+| `digi_px` | `UInt8` | Mid-price in cents |
+| `prob_itm` | `Float32` | `digi_px / 100` |
+| `implied_vol` | `Float32` | Annualized IV; filtered to [20%, 500%] |
+| `btc_close` | `Float32` | BTC spot at bar time |
 
 ---
 
 ## Gold Layer
 
-### `data/gold/summary_stats.csv`
+### `data/gold/rv_iv.parquet` and `data/gold/rv_iv_hourly.parquet`
 
-Plain CSV — small enough that parquet adds no value.
+Output of `rv_iv_analysis.py` (`kvol rv-iv`). See [`etl_rv_iv.md`](etl_rv_iv.md) for the full schema and methodology.
 
 | Column | Type | Notes |
-|---|---|---|
+|--------|------|-------|
+| `bucket` | `Datetime(us, UTC)` | Period start (5-min or 1-hour truncated) |
+| `rv_ann` | `Float64` | Annualized realized vol |
+| `spot` | `Float32` | BTC spot at end of period |
+| `atm_iv_mean` | `Float32` | Mean ATM IV across the period |
+| `vol_premium` | `Float64` | `rv_ann − atm_iv_mean` (negative = IV > RV) |
+| `var_premium` | `Float64` | `rv_ann² − atm_iv_mean²` |
+| `hour_utc` | `Int8` | UTC hour (0–23) |
+| `date` | `Date` | Calendar date |
+
+### `data/gold/summary_stats.csv`
+
+Output of `GoldETL`. Statistical test results for the snapshot feature analysis.
+
+| Column | Type | Notes |
+|--------|------|-------|
 | `feature` | string | `atm_iv` or `skew_25d` |
-| `shift` | string | `T0-T-1` or `T+1-T0` |
-| `mean_shift` | float | |
+| `shift` | string | Snapshot transition, e.g. `T0-T-1` |
+| `mean_shift` | float | Mean of the pairwise difference |
 | `std` | float | |
-| `t_stat` | float | Paired t-test |
+| `t_stat` | float | Paired t-test statistic |
 | `p_value` | float | |
 | `cohens_d` | float | Effect size |
 | `n_days` | int | Valid trading days in sample |
 
 ### `data/gold/plots/`
 
-Two PNG files: `atm_iv_boxplot.png` and `skew_25d_boxplot.png`. Each shows the distribution at T-1 / T0 / T+1.
-
----
-
-## Implied Volatility Methodology
-
-Kalshi BTC daily contracts are cash-or-nothing digital calls: they pay $1 if BTC > K at 4pm ET. With r=0 (appropriate for sub-day expiry):
-
-```
-price = N(d2)
-d2 = [ln(S/K) − σ²T/2] / (σ√T)
-```
-
-### Closed-Form Inversion
-
-Given observed `close` price `p` (cents ÷ 100), spot `S`, strike `K`, time-to-expiry `T`:
-
-**Step 1** — invert the normal CDF:
-```
-d2* = N⁻¹(p)    # scipy.stats.norm.ppf
-```
-
-**Step 2** — substituting `u = σ√T` turns the d2 equation into a quadratic:
-```
-u² + 2·d2*·u − 2·ln(S/K) = 0
-discriminant = d2*² + 2·ln(S/K)
-```
-
-**Step 3** — root selection (the quadratic has two roots; the physically meaningful one depends on moneyness):
-- **ITM** (S > K): one positive root → `u = −d2* + √discriminant`
-- **OTM** (S < K): two positive roots → take the **smaller**: `u = −d2* − √discriminant`
-- **ATM** (S ≈ K): formula degenerates; fall back to `scipy.optimize.brentq`
-
-**Step 4**:
-```
-σ = u / √T
-```
-
-This is O(1) per contract with no iteration. The discriminant stays positive across all valid Kalshi prices (2–98 cents) for strikes within ±$5,000 of spot.
-
-### Time-to-Expiry per Snapshot
-
-Contracts settle at **4pm ET = 21:00 UTC**.
-
-| Snapshot | UTC time | Hours to expiry | T (years) |
-|---|---|---|---|
-| T-1 | 23:00 UTC (prior day) | 22 h | 22/8760 ≈ 0.002511 |
-| T0 | 00:00 UTC | 21 h | 21/8760 ≈ 0.002397 |
-| T+1 | 01:00 UTC | 20 h | 20/8760 ≈ 0.002283 |
+PNG plots produced by `GoldETL`: `atm_iv_boxplot.png`, `skew_25d_boxplot.png`.
 
 ---
 
 ## Compression Strategy
 
-All parquet files use **zstd level 3** (`write_parquet(..., compression="zstd", compression_level=3)`).
+All parquet files use zstd level 3 (`write_parquet(..., compression="zstd", compression_level=3)`).
 
-The dtype choices reduce raw row size before compression applies:
+Dtype choices reduce raw row size before compression:
 - Kalshi prices: `UInt8` (1 byte) vs `Float64` (8 bytes) — 8× reduction per price column
-- Timestamps: second precision `int32`-equivalent vs microsecond `int64`
-- Tickers: `Categorical` → parquet dictionary encodes, ~2–4 bytes effective per row
-
-Combined with zstd and the close-only schema, the candles file sits at ~3–5 MB rather than the ~19–25 MB a naive float64/snappy/OHLC approach would produce.
+- Tickers: `Categorical` → parquet dictionary encoding, ~2–4 bytes effective per row
+- Timestamps: microsecond precision stored as `int64`, zstd compresses repeated date prefixes well
 
 ---
 
-## Kalshi API Endpoints
+## API Endpoint Reference
 
-Base URL: `https://external-api.kalshi.com/trade-api/v2`
+Base URL: `https://api.elections.kalshi.com/trade-api/v2`
 
-| Purpose | Endpoint | Notes |
-|---|---|---|
-| Routing cutoff | `GET /historical/cutoff` | Call once at startup; returns `market_settled_ts` |
-| Live market metadata | `GET /markets?series_ticker=KXBTCD` | Paginated via `cursor` |
-| Historical market metadata | `GET /historical/markets?series_ticker=KXBTCD` | Same params/shape as live |
-| Live candles (batch) | `GET /markets/candlesticks` | `period_interval=1` supported |
-| Historical candles (batch) | `GET /historical/market-candlesticks` | Same shape as live batch |
+| Purpose | Endpoint |
+|---------|----------|
+| Routing cutoff | `GET /historical/cutoff` |
+| Live market metadata | `GET /markets?series_ticker=KXBTCD` |
+| Historical market metadata | `GET /historical/markets?series_ticker=KXBTCD` |
+| Live candles (batch) | `GET /markets/candlesticks` |
+| Historical candles (batch) | `GET /historical/market-candlesticks` |
 
-### Batch Candle Sizing
-
-The batch endpoint accepts up to 100 tickers per request but caps at **10,000 total candlesticks** across all tickers. With 1,260 bars/contract/day:
-
-- Max tickers per call: floor(10,000 / 1,260) = **7**
-- 1,260 total contracts / 7 = **~180 batch calls** (vs 1,260 per-ticker calls)
-
-### Rate Limits
-
-Token-cost system; most GETs cost 10 tokens. Basic tier: 200 tokens/sec = 20 req/sec.
-At 180 calls ÷ 20 req/sec ≈ **9 seconds** for full candle ingest.
-
-Kalshi does **not** return BTC spot/index price in any API response. Binance 1-minute klines are the sole source for BTC spot.
+Batch candle endpoint caps at 10,000 total candlesticks across tickers; with ~1,440 bars/contract/day the practical limit is 7 tickers per call.

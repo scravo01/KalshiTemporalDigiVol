@@ -27,6 +27,7 @@ dependencies = [
     "statsmodels>=0.14.0",
     "streamlit>=1.57.0",
     "tqdm>=4.67.3",
+    "apache-airflow>=3.2.1",
 ]
 
 [project.scripts]

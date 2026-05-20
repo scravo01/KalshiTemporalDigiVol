@@ -13,7 +13,7 @@ Top-level layout; no single source file — see `src/` for all modules.
 ```
                   ┌──────────────────────────────────────────────────┐
                   │                  ENTRY POINTS                    │
-                  │  uv run kvol pipeline  /  run_pipeline.py shim   │
+                  │            uv run kvol pipeline                   │
                   └───────────────────┬──────────────────────────────┘
                                       │
                     ┌─────────────────┼─────────────────┐

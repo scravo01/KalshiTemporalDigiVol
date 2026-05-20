@@ -119,7 +119,7 @@ class TestVolSurfaceSchema:
     EXPECTED_COLS = {
         "trade_date", "snapshot", "bar_ts", "minutes_to_expiry",
         "digi_contract_name", "strike", "expiry_time",
-        "digi_px", "delta", "implied_vol", "btc_close",
+        "digi_px", "prob_itm", "implied_vol", "btc_close",
     }
 
     def test_all_columns_present(self, surface_df):

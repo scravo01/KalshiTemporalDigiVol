@@ -1,33 +1,54 @@
 # KalshiTemporalDigiVol
 
-Research pipeline and backtesting framework for BTC digital options on Kalshi.
+Research pipeline and backtesting framework for BTC digital options on Kalshi. The project measures whether a systematic implied vol premium exists in Kalshi hourly BTC binary markets and whether that premium is concentrated in the Asia trading session — then quantifies it via delta-hedged backtests.
 
-## Overview
+## Key Findings (61-day sample, March–May 2026)
 
-This project tests whether there is a systematic vol premium in Kalshi hourly BTC binary
-options and whether that premium varies by time of day (with focus on the Asian trading
-session). It includes:
+| Metric | Value |
+|--------|-------|
+| Mean IV − RV | +0.161 annualized (~16 vol points) |
+| % observations IV > RV | 73% |
+| t-test significance | p ≈ 0 |
+| Hour-specific cointegration F-test | Significant — per-hour α, β differ materially |
 
-- A production-quality bronze/silver/gold ETL pipeline pulling from Kalshi and Binance APIs
-- An implied vol inversion engine for digital cash-or-nothing calls (closed-form quadratic
-  with Brent's method fallback for ATM)
-- A full vol surface across all 24 UTC expiry hours
-- Statistical analysis: vol premium vs realized vol, skew structure, and intraday vol patterns
-- Two delta-hedged backtests: all 24 hours vs Asia session only (00:00–11:59 UTC)
+**All-hours backtest** (short +25Δ OTM, IV/RV ≥ 1.20 filter, 5-min delta hedge):
+
+| Period | Trades | Sharpe | Win Rate | Max DD |
+|--------|--------|--------|----------|--------|
+| Full (Mar–May) | 82 | 7.15 | 79.3% | −$3,318 |
+| In-sample (Mar–Apr) | 64 | 4.42 | 73.4% | — |
+| Out-of-sample (May) | 18 | 21.98 | 100% | $0 |
+
+**Asia-hours filter** (01:00–10:59 UTC only):
+
+| Period | Trades | Sharpe | Win Rate | Max DD |
+|--------|--------|--------|----------|--------|
+| Full (Mar–May) | 31 | 10.53 | 90.3% | −$761 |
+| In-sample (Mar–Apr) | 23 | 8.02 | 87.0% | −$761 |
+| Out-of-sample (May) | 8 | 24.90 | 100% | $0 |
+
+Bootstrap validation (1,000 × 50% subsamples): P5 Sharpe 3.99, 100% of subsamples profitable.
+
+See [`docs/investment_research.md`](docs/investment_research.md) for the full research memo.
+
+---
 
 ## Quick Start
 
 ```bash
+# Install dependencies
 uv sync
 
 # Run the full pipeline (requires KALSHI_API_KEY in .env)
-uv run kvol pipeline
+uv run kvol pipeline --start-date 2026-03-21 --end-date 2026-05-18
 
-# Or step by step:
-uv run kvol bronze-kalshi --start-date 2026-03-21 --end-date 2026-05-18
+# Or stage by stage:
 uv run kvol bronze-binance --start-date 2026-03-21 --end-date 2026-05-18
+uv run kvol bronze-kalshi  --start-date 2026-03-21 --end-date 2026-05-18
 uv run kvol silver
 uv run kvol vol-surface
+uv run kvol gold
+uv run kvol rv-iv
 
 # Launch the Streamlit dashboard
 uv run streamlit run src/ui/app.py
@@ -39,6 +60,8 @@ uv run jupyter lab notebooks/
 uv run pytest tests/ -v
 ```
 
+---
+
 ## Repository Structure
 
 ```
@@ -46,48 +69,108 @@ src/
   clients/           # Async API clients: Kalshi (RSA-PSS auth) + Binance
   etl/
     bronze/          # Raw API extraction → partitioned parquet by date
-    silver/          # Join + IV inversion → contracts.parquet + vol_surface.parquet
-    gold/            # Feature engineering + statistical tests → features.parquet
-  cli/main.py        # Click CLI entrypoints
+    silver/          # DuckDB join + IV inversion → contracts.parquet + vol_surface.parquet
+    gold/            # Feature engineering, stats, RV-IV analysis → parquets + plots
+  cli/main.py        # Click CLI entrypoints (kvol)
   ui/app.py          # Streamlit dashboard
+dags/
+  kalshi_etl_dag.py  # Airflow DAG: daily scheduled pipeline
 data/
   bronze/            # Raw API data, partitioned by date
   silver/            # contracts.parquet, vol_surface.parquet
-  gold/              # features.parquet, summary_stats.csv, rv_iv.parquet, plots/
+  gold/              # features.parquet, rv_iv.parquet, rv_iv_hourly.parquet, plots/
 notebooks/
-  vol_research.ipynb            # Research: vol premium, skew, Asia open hypothesis
+  vol_research.ipynb            # Vol premium analysis, cointegration, hour effects
   backtest_01_all_hours.ipynb   # Delta-hedged short-vol, all 24 UTC hours
-  backtest_02_asia_hours.ipynb  # Same strategy, Asia session only (00:00–11:59 UTC)
+  backtest_02_asia_hours.ipynb  # Same strategy, Asia session only (01:00–10:59 UTC)
 tests/
-docs/                # Component-level documentation
+docs/               # Component-level documentation
+Dockerfile          # Custom Airflow image with project deps
+docker-compose.airflow.yml  # Postgres + Airflow stack for local scheduling
 ```
 
-## Key Findings (58-day sample, March–May 2026)
+---
 
-- **Vol premium**: ATM IV exceeds 5-min realized vol by ~20 annualized vol points on
-  average (p ≈ 0, persistent across all three calendar months in sample). Roughly 73% of
-  5-min windows have IV > RV.
-- **Asia open hypothesis (Q3)**: ATM IV at 01:00 UTC is *not* significantly higher than
-  other expiry hours (one-sided t-test: p = 0.29; Tukey HSD: no pairwise significance).
-  Peak ATM IV hour is 10 UTC. Realized vol is elevated at 01:00 UTC relative to 14 UTC,
-  but hours 03–12 have higher realized vol than hour 01. The original hypothesis is not
-  supported at this sample size.
-- **Backtest**: A delta-hedged short-25Δ strategy with IV/RVol ≥ 1.20 filter, 10¢ minimum
-  premium, and 50% early-exit generates 78 trades over 58 days. Parameters were set on
-  first principles; out-of-sample validation is included in the notebooks.
+## Architecture
+
+```
+Binance API ──► BinanceBronzeETL ──► data/bronze/binance_btc_1m.parquet
+                                              │
+Kalshi API ───► KalshiBronzeETL  ──► data/bronze/kalshi_{markets,candles}_*.parquet
+                                              │
+                              SilverETL (DuckDB join + IV inversion)
+                                     │                  │
+                        contracts.parquet        vol_surface.parquet
+                                     │                  │
+                               GoldETL             RV-IV Analysis
+                                     │                  │
+                          features.parquet      rv_iv_hourly.parquet
+                          summary_stats.csv
+```
+
+Each layer reads only from the layer directly below it. All timestamps are UTC. Polars is the primary DataFrame library; DuckDB is used only in silver-layer joins.
+
+---
+
+## Airflow Deployment
+
+A full Airflow + Docker stack is included for automated daily scheduling.
+
+```bash
+# One-time setup: generate a Fernet key and add to .env
+python -c "from cryptography.fernet import Fernet; print('AIRFLOW_FERNET_KEY=' + Fernet.generate_key().decode())" >> .env
+
+# Create the Airflow admin password file (plaintext, gitignored)
+echo '{"admin": "admin"}' > .airflow_passwords.json
+
+# Build image and start stack
+docker compose -f docker-compose.airflow.yml up -d
+
+# Open Airflow UI
+open http://localhost:8080   # admin / admin
+```
+
+The DAG `kalshi_etl_pipeline` runs daily at 22:30 UTC. For manual triggers with custom date ranges use **Trigger DAG w/ config** in the UI. Data is written directly to `data/` on the host via bind mount.
+
+See [`docs/airflow.md`](docs/airflow.md) for full setup instructions.
+
+---
+
+## Environment Setup
+
+Create a `.env` file at the repo root:
+
+```bash
+# Kalshi API credentials
+KEY_ID=<your-kalshi-key-uuid>
+KALSHI_API_KEY="-----BEGIN RSA PRIVATE KEY-----
+...your RSA-2048 PEM private key...
+-----END RSA PRIVATE KEY-----"
+
+# Airflow (only needed for Docker deployment)
+AIRFLOW_FERNET_KEY=<base64-fernet-key>
+```
+
+The Kalshi API uses RSA-PSS authentication. `KEY_ID` is the UUID shown in your Kalshi API key settings; `KALSHI_API_KEY` is the full RSA-2048 PEM private key (multi-line, quoted).
+
+---
 
 ## Limitations
 
-- 58-day sample covers a single BTC regime; results are not regime-generalizable.
-- Thin order books (median 4 strikes per expiry); IV estimates are noisy.
-- Kalshi market capacity constrains the backtest to ~$250–$500 notional per trade before
-  market impact materially erodes the edge.
-- See `notebooks/vol_research.ipynb` for full methodology and caveats.
+- 61-day sample covers a single BTC regime; results are not regime-generalizable.
+- Kalshi market capacity constrains each trade to ~$250–$500 notional before market impact erodes the edge; practical AUM ceiling is ~$50–100k.
+- Modeled transaction costs (10 bps slippage) are optimistic — actual Kalshi bid-ask spreads are 12–20 bps.
+- Out-of-sample hold-out periods are 8–18 trades; statistically thin.
 
-## Environment
+---
 
-Create a `.env` file with:
-```
-KEY_ID=<your-kalshi-key-uuid>
-KALSHI_API_KEY=<your-rsa-2048-pem-private-key>
-```
+## Documentation
+
+Component-level documentation lives in [`docs/`](docs/). Key references:
+
+| Doc | Description |
+|-----|-------------|
+| [`docs/investment_research.md`](docs/investment_research.md) | Full strategy research memo with tables and conclusions |
+| [`docs/airflow.md`](docs/airflow.md) | Airflow + Docker setup and DAG overview |
+| [`docs/architecture.md`](docs/architecture.md) | Medallion pipeline data flow and layer contracts |
+| [`docs/implied_vol.md`](docs/implied_vol.md) | Digital Black-Scholes IV inversion derivation |

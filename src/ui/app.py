@@ -48,7 +48,7 @@ features = load_features()
 stats_df = load_stats()
 
 if contracts.is_empty():
-    st.warning("No silver data found. Run `python run_pipeline.py` first.")
+    st.warning("No silver data found. Run `uv run kvol pipeline` first.")
     st.stop()
 
 # ── sidebar controls ──────────────────────────────────────────────────────────

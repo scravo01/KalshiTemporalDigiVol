@@ -83,7 +83,7 @@ def bronze_kalshi(
 ) -> None:
     """Fetch Kalshi markets and candles → bronze parquets (hours 22,23,0,1,2,3 UTC)."""
     logging.basicConfig(
-        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ"
+        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ", force=True
     )
 
     async def _run() -> None:
@@ -110,7 +110,7 @@ def bronze_kalshi(
 def bronze_binance(start_date: date, end_date: date, bronze_dir: str) -> None:
     """Fetch Binance BTCUSDT 1m klines → bronze parquet."""
     logging.basicConfig(
-        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ"
+        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ", force=True
     )
 
     async def _run() -> None:
@@ -136,7 +136,7 @@ def bronze_binance(start_date: date, end_date: date, bronze_dir: str) -> None:
 def silver(bronze_dir: str, silver_dir: str) -> None:
     """Join bronze parquets, compute IV and delta → silver parquet."""
     logging.basicConfig(
-        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ"
+        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ", force=True
     )
     SilverETL(bronze_dir=Path(bronze_dir), silver_dir=Path(silver_dir)).run()
 
@@ -151,7 +151,7 @@ def silver(bronze_dir: str, silver_dir: str) -> None:
 def vol_surface(bronze_dir: str, silver_dir: str) -> None:
     """Compute IV at every traded minute → silver/vol_surface.parquet."""
     logging.basicConfig(
-        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ"
+        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ", force=True
     )
     VolSurfaceETL(bronze_dir=Path(bronze_dir), silver_dir=Path(silver_dir)).run()
 
@@ -160,7 +160,7 @@ def vol_surface(bronze_dir: str, silver_dir: str) -> None:
 def gold_cmd() -> None:
     """Compute gold-layer features and summary stats → gold parquets."""
     logging.basicConfig(
-        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ"
+        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ", force=True
     )
     gold_run()
 
@@ -169,7 +169,7 @@ def gold_cmd() -> None:
 def rv_iv_cmd() -> None:
     """Compute 5-min realised vol vs ATM implied vol and generate analysis plots."""
     logging.basicConfig(
-        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ"
+        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ", force=True
     )
     from src.etl.gold.rv_iv_analysis import run
     run()
@@ -196,7 +196,7 @@ def rv_iv_cmd() -> None:
 def pipeline(start_date: date, end_date: date, api_key: str, data_dir: str) -> None:
     """Run the full bronze → silver → gold pipeline."""
     logging.basicConfig(
-        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ"
+        level=logging.INFO, format=_LOG_FMT, datefmt="%Y-%m-%dT%H:%M:%SZ", force=True
     )
     root = Path(data_dir)
     bronze = root / "bronze"
@@ -228,3 +228,7 @@ def main() -> None:
     """Entry point: loads .env then dispatches to the Click CLI."""
     load_dotenv()
     cli()
+
+
+if __name__ == "__main__":
+    main()

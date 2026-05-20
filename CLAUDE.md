@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Purpose
 
-Research project testing whether ATM implied vol and 25-delta skew on Kalshi BTC daily binary markets shift around the Asian market open (00:00 UTC). See `PLAN.md` for the full research design, hypothesis, and success criteria.
+Research pipeline and backtesting framework for BTC digital options on Kalshi. The project has established that a systematic vol premium exists (ATM IV > 5-min RV in 73% of observations, p ≈ 0) and that a delta-hedged short-OTM strategy achieves Sharpe 7.15 across all hours (10.53 Asia-hours only) over the 61-day sample (March–May 2026). See `docs/investment_research.md` for the full findings and `README.md` for a quick summary.
 
 ## Commands
 
@@ -13,10 +13,13 @@ Research project testing whether ATM implied vol and 25-delta skew on Kalshi BTC
 uv sync
 
 # Run a full pipeline stage (uses .env for KALSHI_API_KEY)
-uv run kvol bronze-kalshi --start-date 2026-03-19 --end-date 2026-05-18
-uv run kvol bronze-binance --start-date 2026-03-19 --end-date 2026-05-18
+uv run kvol bronze-kalshi --start-date 2026-03-21 --end-date 2026-05-18
+uv run kvol bronze-binance --start-date 2026-03-21 --end-date 2026-05-18
 uv run kvol silver
-uv run kvol pipeline  # runs all stages
+uv run kvol vol-surface
+uv run kvol gold
+uv run kvol rv-iv       # computes RV vs IV premium → data/gold/rv_iv*.parquet
+uv run kvol pipeline    # runs all stages end-to-end
 
 # Run tests
 uv run pytest tests/ -v
@@ -36,13 +39,15 @@ The pipeline follows a bronze/silver/gold medallion pattern with strict layer co
 
 ```
 src/clients/         # API wrappers — Kalshi and Binance, return polars DataFrames
-src/cli/main.py      # Click CLI: bronze-kalshi, bronze-binance, silver, vol-surface, pipeline
+src/cli/main.py      # Click CLI: bronze-kalshi, bronze-binance, silver, vol-surface, gold, rv-iv, pipeline
 src/etl/base.py      # Abstract BaseETL with async extract/transform/load
 src/etl/bronze/      # Extract API → parquet (raw, minimal transformation)
-src/etl/silver/      # Join + feature engineering using DuckDB
-src/etl/gold/        # Stats and plots only — consumes silver parquet
+src/etl/silver/      # Join + IV inversion using DuckDB → contracts.parquet + vol_surface.parquet
+src/etl/gold/        # Stats, plots, RV-IV analysis — consumes silver parquets
+  gold_etl.py        # ATM IV, 25Δ skew, t-tests, Wilcoxon, Cohen's d → summary_stats.csv
+  rv_iv_analysis.py  # 5-min and hourly RV vs IV premium → rv_iv*.parquet
 data/{bronze,silver,gold}/
-run_pipeline.py      # Thin shim delegating to `kvol pipeline`
+dags/kalshi_etl_dag.py  # Airflow DAG for daily scheduled pipeline
 ```
 
 **Kalshi API (as of 2026)**: Base URL `https://api.elections.kalshi.com/trade-api/v2`. Authentication is RSA-PSS (not Bearer token) — `.env` must contain `KEY_ID` (UUID) and `KALSHI_API_KEY` (RSA-2048 PEM private key). Signing message: `timestamp_ms + METHOD + /trade-api/v2 + path`. Markets are now **hourly** binary options (e.g., `KXBTCD-26MAY1901-T85799.99`) settling each UTC hour with ~188 strikes. Old daily format (`KXBTCD-25MAY24-B95000`) no longer active.
@@ -53,7 +58,7 @@ run_pipeline.py      # Thin shim delegating to `kvol pipeline`
 
 **Candle price format**: New API returns `yes_ask.close_dollars` and `yes_bid.close_dollars` (USD string, e.g., "0.23"). Mid-price is computed and stored as cents (UInt8, 0–100). Old API returned `price.close` as integer cents directly — both formats are handled.
 
-**Silver** (`src/etl/silver/`): DuckDB join with `SET TimeZone='UTC'`. Snapshots are T-1 (23:00 UTC prior day), T0 (00:00 UTC), T+1 (01:00 UTC). Filter `expiry_time > snapshot_ts` ensures only open markets are sampled. Time-to-expiry T is computed dynamically as `(expiry_time - snapshot_ts).total_seconds() / (365.25 * 24 * 3600)` — not hardcoded.
+**Silver** (`src/etl/silver/`): Two ETLs share the same DuckDB join logic (`SET TimeZone='UTC'`). `SilverETL` produces `contracts.parquet` with snapshot-level IV per (trade_date, UTC hour, ticker). `VolSurfaceETL` produces `vol_surface.parquet` with IV at every traded minute across all 24 UTC expiry hours. Filter `expiry_time > snapshot_ts` ensures only open markets are sampled. Time-to-expiry T is computed dynamically — not hardcoded. Column `prob_itm` = `digi_px / 100` in both output parquets.
 
 **Implied vol inversion** (`src/etl/silver/implied_vol.py`): Kalshi binary markets are cash-or-nothing digital calls. A closed-form solution: substituting `u = σ√T` into `N⁻¹(p) = ln(S/K)/u − u/2` yields a quadratic in `u`. Root selection: ITM → `u = −d2* + √disc`; OTM → `u = −d2* − √disc`; ATM → `scipy.optimize.brentq`. `compute_t` is kept for tests but not used by the silver ETL.
 
