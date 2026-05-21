@@ -24,19 +24,21 @@ The vol premium is real, statistically significant, and extractable. Over 61 tra
 | t-test significance | p ≈ 0 |
 | Hour-specific cointegration F-test | Significant — per-hour α, β differ materially from pooled |
 
-**All-hours backtest** (short +25Δ OTM, IV/RV ≥ 1.20 filter, 5-min delta hedge, 61-day sample):
+**Backtest setup:** March 21 – May 18, 2026 (61 days). $100,000 starting equity, no leverage. Delta hedge executed via Binance BTCUSDT perpetual futures, rebalanced every 5 minutes. Entry filter: IV/RV ≥ 1.20, minimum option premium ≥ 10¢. Early exit at 50% of entry premium.
 
-| Trades | Sharpe | Max Drawdown | Calmar |
-|--------|--------|--------------|--------|
-| 82 | 7.15 | −$3,318 | 1.80 |
+**All-hours** (short +25Δ OTM across all 24 UTC expiry hours):
 
-**Asia-hours backtest** (01:00–10:59 UTC only):
+| Trades | Ann. Return | Ann. Vol | Sharpe |
+|--------|-------------|----------|--------|
+| 82 | 53.1% | 7.4% | 7.15 |
+
+**Asia-hours** (01:00–10:59 UTC only):
 
 The vol premium cointegration analysis revealed that the IV/RV relationship is structurally heterogeneous across UTC hours — the per-hour model is strongly preferred over the pooled model (F-test and LR test both significant). Hours in the Asia session (01:00–10:59 UTC) consistently show the largest log-premiums. Restricting trades to these hours is therefore a research-driven filter, not curve-fitting.
 
-| Trades | Sharpe | Max Drawdown | Calmar | vs All-Hours Sharpe |
-|--------|--------|--------------|--------|---------------------|
-| 31 | 10.53 | −$761 | 4.27 | +47% |
+| Trades | Ann. Return | Ann. Vol | Sharpe | vs All-Hours Sharpe |
+|--------|-------------|----------|--------|---------------------|
+| 31 | 51.5% | 4.9% | 10.53 | +47% |
 
 > **Full research memo:** [`ResearchReport.md`](ResearchReport.md) — covers vol premium analysis, hour-specific cointegration model, complete backtest tables with walk-forward and bootstrap results, capacity analysis, risk factors, and recommended next steps.
 
