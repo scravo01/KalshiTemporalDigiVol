@@ -24,25 +24,21 @@ The vol premium is real, statistically significant, and extractable. Over 61 tra
 | t-test significance | p ≈ 0 |
 | Hour-specific cointegration F-test | Significant — per-hour α, β differ materially from pooled |
 
-**All-hours backtest** (short +25Δ OTM, IV/RV ≥ 1.20 filter, 5-min delta hedge):
+**All-hours backtest** (short +25Δ OTM, IV/RV ≥ 1.20 filter, 5-min delta hedge, 61-day sample):
 
-| Period | Trades | Sharpe | Win Rate | Max Drawdown |
-|--------|--------|--------|----------|--------------|
-| Full (Mar–May) | 82 | 7.15 | 79.3% | −$3,318 |
-| In-sample (Mar–Apr) | 64 | 4.42 | 73.4% | — |
-| Out-of-sample (May) | 18 | 21.98 | 100% | $0 |
+| Trades | Sharpe | Max Drawdown | Calmar |
+|--------|--------|--------------|--------|
+| 82 | 7.15 | −$3,318 | 1.80 |
 
-**Asia-hours filter** (01:00–10:59 UTC only):
+**Asia-hours backtest** (01:00–10:59 UTC only):
 
-| Period | Trades | Sharpe | Win Rate | Max Drawdown |
-|--------|--------|--------|----------|--------------|
-| Full (Mar–May) | 31 | 10.53 | 90.3% | −$761 |
-| In-sample (Mar–Apr) | 23 | 8.02 | 87.0% | −$761 |
-| Out-of-sample (May) | 8 | 24.90 | 100% | $0 |
+The vol premium cointegration analysis revealed that the IV/RV relationship is structurally heterogeneous across UTC hours — the per-hour model is strongly preferred over the pooled model (F-test and LR test both significant). Hours in the Asia session (01:00–10:59 UTC) consistently show the largest log-premiums. Restricting trades to these hours is therefore a research-driven filter, not curve-fitting.
 
-Bootstrap validation (1,000 × 50% subsamples): **P5 Sharpe 3.99**, 100% of subsamples profitable. The Asia-session filter improves Sharpe by 47% and cuts max drawdown by 77% vs all-hours.
+| Trades | Sharpe | Max Drawdown | Calmar | vs All-Hours Sharpe |
+|--------|--------|--------------|--------|---------------------|
+| 31 | 10.53 | −$761 | 4.27 | +47% |
 
-> **Full research memo:** [`investment_research.md`](investment_research.md) — covers vol premium analysis, hour-specific cointegration model, complete backtest tables with walk-forward and bootstrap results, capacity analysis, risk factors, and recommended next steps.
+> **Full research memo:** [`ResearchReport.md`](ResearchReport.md) — covers vol premium analysis, hour-specific cointegration model, complete backtest tables with walk-forward and bootstrap results, capacity analysis, risk factors, and recommended next steps.
 
 ---
 
@@ -232,7 +228,7 @@ uv run jupyter lab notebooks/
 | 2 | `backtest_01_all_hours.ipynb` | Delta-hedged short +25Δ OTM, all 24 UTC expiry hours, walk-forward validation (Mar–Apr in-sample / May out-of-sample) |
 | 3 | `backtest_02_asia_hours.ipynb` | Same strategy restricted to Asia session (01:00–10:59 UTC), bootstrap validation (1,000 × 50% subsamples) |
 
-After running the notebooks, read [`investment_research.md`](investment_research.md) for the consolidated findings, tables, risk factors, and recommended next steps.
+After running the notebooks, read [`ResearchReport.md`](ResearchReport.md) for the consolidated findings, tables, risk factors, and recommended next steps.
 
 ---
 
@@ -292,7 +288,7 @@ notebooks/
   backtest_02_asia_hours.ipynb  # Asia-session filter + bootstrap
 tests/               # pytest suite with aioresponses mocks
 docs/                # Component-level documentation
-investment_research.md          # Consolidated research memo
+ResearchReport.md          # Consolidated research memo
 Dockerfile                      # Custom Airflow image
 docker-compose.airflow.yml      # Postgres + Airflow stack
 ```
@@ -303,7 +299,7 @@ docker-compose.airflow.yml      # Postgres + Airflow stack
 
 | Doc | Description |
 |-----|-------------|
-| [`investment_research.md`](investment_research.md) | Full strategy memo: methodology, findings tables, bootstrap results, risk factors |
+| [`ResearchReport.md`](ResearchReport.md) | Full strategy memo: methodology, findings tables, bootstrap results, risk factors |
 | [`docs/airflow.md`](docs/airflow.md) | Airflow + Docker setup, DAG details, Airflow 3.x notes |
 | [`docs/architecture.md`](docs/architecture.md) | Medallion pipeline data flow and layer contracts |
 | [`docs/implied_vol.md`](docs/implied_vol.md) | Digital Black-Scholes IV inversion derivation |
