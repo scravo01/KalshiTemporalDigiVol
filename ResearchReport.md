@@ -23,13 +23,13 @@ Motivated by these findings, we backtest a vanilla short-volatility strategy —
 
 The volatility risk premium — the systematic tendency of implied volatility to exceed subsequently realized volatility — is one of the most extensively documented phenomena in listed options markets. In equity index options, for example, the VIX historically averages 3–5 percentage points above subsequent 30-day realized vol, giving rise to large literatures on variance swaps, delta-hedged straddles, and short-volatility portfolios. The economic interpretation is that option sellers are compensated for bearing negative-skewness and jump risk that is not fully captured in realized vol, and that liquidity providers in options markets charge a spread that embeds an insurance premium.
 
-Kalshi is a US-regulated prediction market (CFTC-licensed) that began listing binary options on BTC price movements in 2025. Its contracts are cash-or-nothing digital calls: a contract on BTC trading above a given strike K at a specific UTC hour pays $1 if BTC closes above K, and $0 otherwise. The market trades continuously and offers approximately 188 strike levels per hourly expiry. Because each contract price is directly interpretable as a risk-neutral probability, and because the underlying (spot BTC) is liquidly traded on centralized exchanges, these instruments offer an unusually clean setting in which to test for a vol premium and to design hedging strategies.
+Kalshi is a US-regulated prediction market (CFTC-licensed) that began listing binary options on BTC price movements in 2025. Its contracts are cash-or-nothing digital calls: a contract on BTC trading above a given strike K at a specific UTC hour pays \$1 if BTC closes above K, and \$0 otherwise. The market trades continuously and offers approximately 188 strike levels per hourly expiry. Because each contract price is directly interpretable as a risk-neutral probability, and because the underlying (spot BTC) is liquidly traded on centralized exchanges, these instruments offer an unusually clean setting in which to test for a vol premium and to design hedging strategies.
 
 Three features of this market make it analytically interesting. First, the short tenors (sub-hourly time-to-expiry at entry) mean that realized vol can be estimated over almost the exact same window that the option prices. Second, the binary payout structure admits a closed-form implied volatility inversion via a quadratic equation, avoiding the numerical iteration required for vanilla puts and calls. Third, because Kalshi is a relatively new and retail-dominated venue, pricing inefficiencies that institutional vol arbitrageurs have already eliminated in listed equity options markets may still be present.
 
 ### 1.2 Market Structure
 
-As of 2026, Kalshi BTC contracts settle at the top of each UTC hour. The contract naming convention encodes the expiry: `KXBTCD-26MAY1901-T85799.99` settles at 19:00 UTC on May 19, 2026 at a strike of $85,799.99. Approximately 188 strike levels are available per expiry, spaced at regular intervals around spot BTC. Contract prices are quoted in cents (0–100) and represent the probability that BTC exceeds the strike at expiry. The face value of each contract is $1.00.
+As of 2026, Kalshi BTC contracts settle at the top of each UTC hour. The contract naming convention encodes the expiry: `KXBTCD-26MAY1901-T85799.99` settles at 19:00 UTC on May 19, 2026 at a strike of \$85,799.99. Approximately 188 strike levels are available per expiry, spaced at regular intervals around spot BTC. Contract prices are quoted in cents (0–100) and represent the probability that BTC exceeds the strike at expiry. The face value of each contract is \$1.00.
 
 The platform charges a taker fee equal to `0.07 × C × P × (1 − P)` per contract, where P is the contract price and C is the number of contracts. This fee peaks at 1.75¢ per contract when P = 0.50 (ATM) and approaches zero for deeply OTM or ITM contracts. The fee schedule creates a natural advantage for OTM sellers: at a 25-cent entry price, the taker fee is approximately 1.31¢ per contract.
 
@@ -121,6 +121,22 @@ Root selection depends on moneyness:
 
 The implied vol is then `σ = u / √T`. The `r = 0` assumption is justified for sub-hourly tenors where risk-free carry is negligible relative to the option premium.
 
+### 3.3 Vol Surface Structure
+
+The 3D charts below illustrate how implied vol varies across strike (log-moneyness) and time-to-expiry for a given snapshot, and how the shape evolves across trading sessions.
+
+**Intraday vol smile at T0 (60 min to expiry):**
+
+![Intraday Vol Smile at T0](data/gold/plots/vol_surface_intraday_T0.png)
+
+*Figure 3.1: Vol surface at the T0 snapshot (60 minutes to expiry). IV spikes sharply near ATM and for very short tenors, consistent with gamma concentration near the binary payout boundary.*
+
+**Vol surface across sessions:**
+
+![Vol Surface Across Sessions](data/gold/plots/vol_surface_cross_session.png)
+
+*Figure 3.2: BTC digital options vol surface across session snapshots (T−12 through T+9). The surface reveals elevated IV in the periods immediately surrounding each UTC hour settlement, with the Asia session snapshots (T+1 through T+9) showing structurally higher IV levels.*
+
 ---
 
 ## 4. Research Questions and Test Designs
@@ -178,7 +194,11 @@ p-value (H₁: mean > 0)        :  2.21 × 10⁻¹⁰⁰
 
 The null hypothesis of zero premium is rejected at any conventional significance level. The mean premium of 16.2 annualized vol points is economically large — approximately one-third of typical BTC ATM vol levels (~52% in this sample). The mean exceeds the median because the distribution is right-skewed: occasional BTC vol spikes push RV well above IV in a minority of windows, but these are outnumbered nearly four-to-one by windows where IV > RV.
 
-The premium is persistent across all three calendar months. Plotting daily median ATM IV and RV reveals that ATM IV runs consistently above RV, with the spread rarely closing except on high-vol days. The standard deviation of the iv_premium is approximately 0.264 annualized, reflecting noisy individual-hour outcomes around a strongly positive long-run mean.
+![Q1 Vol Premium Panel](data/gold/plots/q1_vol_premium_panel.png)
+
+*Figure 5.1: (Left) Daily median ATM IV (red) vs realized vol (blue) from March 21 to May 18, 2026. The gray band shows the IV−RV spread, which is persistently positive. (Right) Distribution of the IV premium across 1,419 hourly windows. The distribution is right-skewed with mean +0.162 and 78.7% of observations above zero.*
+
+The premium is persistent across all three calendar months. The standard deviation of the iv_premium is approximately 0.264 annualized, reflecting noisy individual-hour outcomes around a strongly positive long-run mean.
 
 ### 5.2 Q2 — Cointegration of log(RV) and log(IV)
 
@@ -215,7 +235,11 @@ E[log(IV/RV)]   =  +0.4346
 exp(mean)       =   1.5443   →  IV averages 54% higher than RV in log-space
 ```
 
-The low R² (4.2%) and near-zero β (0.15) reveal that log(RV) explains very little of the *variation* in log(IV) on an hour-by-hour basis — the two series do not co-move tightly in the short run. However, the stationary residuals and significant EG test confirm a stable *level* relationship: the log-spread does not drift without bound. The mean log-spread of +0.43 (IV/RV ≈ 1.54× on average) is the most relevant summary for the strategy.
+The low R² (4.2%) and near-zero β (0.15) reveal that log(RV) explains very little of the *variation* in log(IV) on an hour-by-hour basis. However, stationary residuals and the significant EG test confirm a stable *level* relationship: the log-spread does not drift without bound.
+
+![Q2 Cointegration Panel](data/gold/plots/q2_cointegration_panel.png)
+
+*Figure 5.6: (Left) Daily average log(RV) and log(IV). Both series are stationary (ADF p < 0.003) and move together, with log(IV) consistently above log(RV). (Right) Daily log-spread = log(IV/RV). The mean of +0.43 (red dashed line) implies IV/RV = 1.54× on average; the spread is volatile but mean-reverting, confirming a stable long-run equilibrium.*
 
 ### 5.3 Q3 — The IV-RV Relationship Is Structurally Heterogeneous Across Hours
 
@@ -238,9 +262,19 @@ LR χ²(46)   = 139.576    p = 2.31 × 10⁻¹¹
 
 Both tests reject the pooled model at extreme significance levels. The IV-RV cointegrating relationship is structurally heterogeneous: some UTC hours carry a substantially different log-premium than the pooled average.
 
-**Per-hour OLS intercepts.** Fitting separate regressions for each UTC hour reveals the structure. Asia session hours (01:00–10:59 UTC) carry the most negative per-hour intercepts (α_h ranging from −0.66 to −1.06), reflecting hours when both log(IV) and log(RV) are lower in absolute terms — consistent with typically quieter BTC volatility during Asian daylight hours. Crucially, the *differential* between IV and RV within these hours remains elevated because IV does not fall proportionally with RV. By contrast, hours 13–15 UTC have the least negative intercepts (−0.21 to −0.30), reflecting hours when BTC vol is highest and IV is most competitively priced.
+![Q3 Per-Hour Intercepts](data/gold/plots/q3_per_hour_intercepts.png)
 
-This cross-sectional heterogeneity directly motivates the Asia-session filter in the trading strategy: it selects the hours where the vol premium is structurally largest, as confirmed by the F-test rejection of the pooled model.
+*Figure 5.7: Per-hour OLS intercepts α_h from the unrestricted cointegration model. Green bars = Asia session (01–10 UTC), red bars = persistently loss-making hours (14–15 UTC), blue = other hours. The green shaded zone and red shaded zone highlight the session boundaries. The black dashed line is the pooled α = −0.5595. Asia hours carry the most negative α_h values (−0.66 to −1.06), reflecting structurally elevated log-premiums during those hours relative to the pooled average.*
+
+**Per-hour OLS intercepts.** Asia session hours (01:00–10:59 UTC) carry the most negative per-hour intercepts (α_h from −0.66 to −1.06), reflecting hours when both log(IV) and log(RV) are lower in absolute terms but the differential remains large. Hours 13–15 UTC have the least negative intercepts (−0.21 to −0.30), reflecting hours when BTC vol is highest and IV is most competitively priced. This cross-sectional heterogeneity directly motivates the Asia-session filter in the trading strategy.
+
+![ATM IV Across Snapshots](data/gold/plots/atm_iv_boxplot.png)
+
+*Figure 5.8: Distribution of ATM implied vol across 24 hourly snapshots (T−11 through T+12), showing the full box-and-whisker. IV is markedly elevated at expiry-adjacent snapshots (T0, T+1, T+2) due to the binary payout structure concentrating gamma near settlement. Pre-expiry snapshots (T−5 through T−1) show lower and more stable IV, which is the regime the strategy trades in.*
+
+![25Δ Skew Across Snapshots](data/gold/plots/skew_25d_boxplot.png)
+
+*Figure 5.9: 25Δ skew = (IV\_{+25Δ} − IV\_{−25Δ}) / ATM IV across snapshots. The skew is broadly symmetric around zero but with fat tails, indicating no persistent directional skew bias in the Kalshi market — consistent with a retail-dominated order book without strong institutional hedging flows in a single direction.*
 
 ---
 
@@ -267,7 +301,7 @@ Select the strike with `digi_px` closest to 25 cents (`argmin |digi_px − 25|`)
 
 **IV/RV filter.** Only enter if `IV / RV_1h ≥ 1.20`, where `RV_1h` is the annualized realized vol over the 60 minutes immediately before the entry timestamp.
 
-**Position size.** 1,000 contracts per trade. At 25¢ entry, gross premium received = $250 per trade. Maximum theoretical loss = $1,000 (full ITM expiry).
+**Position size.** 1,000 contracts per trade. At 25¢ entry, gross premium received = \$250 per trade. Maximum theoretical loss = \$1,000 (full ITM expiry).
 
 **Entry timing.** Selected at the maximum `minutes_to_expiry` snapshot available — typically T−12 minutes before the hour.
 
@@ -279,23 +313,23 @@ $$\Delta_{\text{binary}} = \frac{n(d_2)}{S \cdot \sigma \cdot \sqrt{T}}$$
 
 where `n(·)` is the standard normal PDF. This represents the BTC units to hold long per contract short.
 
-**Mechanics.** At entry, purchase `N_contracts × Δ` BTC units. Every 5 minutes, recompute Δ at current (S, IV, T) and adjust the BTC position at 1 bps rebalance cost. The position is unwound at exit. Average hedge P&L across all 82 full-period trades: **$48.58 per trade**.
+**Mechanics.** At entry, purchase `N_contracts × Δ` BTC units. Every 5 minutes, recompute Δ at current (S, IV, T) and adjust the BTC position at 1 bps rebalance cost. The position is unwound at exit. Average hedge P&L across all 82 full-period trades: **\$48.58 per trade**.
 
 ### 6.4 Exit Rules
 
 **Early exit (profit-taking).** At each 5-minute rebalance, compute the current binary call price. If ≤ 50% of entry price, close immediately to avoid the gamma crunch in the final minutes before expiry. In the full backtest, **82.9% of trades are exited early**.
 
-**Hold to expiry.** If the threshold is never reached, settle at the UTC hour. Loss of $1,000 if BTC > strike; full premium retained if BTC ≤ strike.
+**Hold to expiry.** If the threshold is never reached, settle at the UTC hour. Loss of \$1,000 if BTC > strike; full premium retained if BTC ≤ strike.
 
 ### 6.5 Transaction Costs
 
 | Cost Component | Formula / Rate | Example (25¢ entry, 1,000 contracts) |
 |----------------|---------------|--------------------------------------|
-| Kalshi taker fee | 0.07 × C × P × (1 − P) | $13.13 per entry |
-| Premium slippage | 100 bps on gross premium | $2.50 per side |
-| BTC rebalance | 1 bps per trade | ~$10–15 per trade total |
+| Kalshi taker fee | `0.07 × C × P × (1 − P)` | \$13.13 per entry |
+| Premium slippage | 100 bps on gross premium | \$2.50 per side |
+| BTC rebalance | 1 bps per trade | ~\$10–15 per trade total |
 
-**Total TC across 82 trades: $4,292** (~$52.34/trade, ~22% of gross premium).
+**Total TC across 82 trades: \$4,292** (~\$52.34/trade, ~22% of gross premium).
 
 ### 6.6 Asia-Hours Variant
 
@@ -312,76 +346,82 @@ Portfolio starting value       :  $100,000
 N contracts per trade          :  1,000
 
 N trades                       :  82
-Total return ($)               :  $5,959.66
+Total return                   :  $5,959.66
 Annualized return              :  53.06%
 Realized daily vol (ann.)      :  7.17%
 Sharpe ratio (ann.)            :  7.15
 Win rate                       :  79.3%
-Max drawdown ($)               : −$3,318.00
+Max drawdown                   : −$3,318.00
 Calmar ratio                   :  1.796
 ITM expiry rate                :  11.0%
 Early exit rate                :  82.9%
-Avg P&L per trade ($)          :  $72.68
-Avg hedge P&L per trade ($)    :  $48.58
-Avg premium received ($)       :  $239.88
-Total transaction costs ($)    : −$4,291.97
+Avg P&L per trade              :  $72.68
+Avg hedge P&L per trade        :  $48.58
+Avg premium received           :  $239.88
+Total transaction costs        : −$4,291.97
 ```
 
 **P&L decomposition (average per trade):**
-- Gross premium: +$239.88
-- Transaction costs: −$52.34
-- Delta-hedge P&L: +$48.58
-- Settlement loss (amortized over 9 ITM expiries): ~−$110.98
-- **Net P&L: +$72.68**
+- Gross premium: +\$239.88
+- Transaction costs: −\$52.34
+- Delta-hedge P&L: +\$48.58
+- Settlement loss (amortized over 9 ITM expiries): ~−\$110.98
+- **Net P&L: +\$72.68**
+
+![All Hours Cumulative P&L](data/gold/plots/backtest_all_hours_cumulative.png)
+
+*Figure 7.1: Cumulative P&L decomposition for the all-hours strategy (82 trades). The top panel shows total P&L (black), net premium capture (green), hedge P&L (blue), settlement losses (red), and cumulative transaction costs (grey). The bottom panel shows drawdown in USD. The main drawdown of −\$3,318 occurs in late April and fully recovers by mid-May. The strategy ends at +\$5,960 total return.*
 
 **Walk-forward validation** (parameters fixed at training-set values, not re-optimized):
 
 | Period | Dates | Trades | Sharpe | Win Rate | Max DD |
 |--------|-------|--------|--------|----------|--------|
-| In-sample | Mar 21 – Apr 30 | 64 | 4.42 | 73.4% | −$3,318 |
-| Out-of-sample | May 1 – May 18 | 18 | 21.98 | 100% | $0 |
+| In-sample | Mar 21 – Apr 30 | 64 | 4.42 | 73.4% | −\$3,318 |
+| Out-of-sample | May 1 – May 18 | 18 | 21.98 | 100% | \$0 |
 
 **Cross-validation by UTC expiry hour:**
 
 | Hour UTC | Trades | Sharpe | Win Rate | ITM Rate | Total Return |
 |----------|--------|--------|----------|----------|-------------|
-| 0 | 1 | n/a | 0.0% | 100% | −$856 |
-| 2 | 6 | 30.02 | 100% | 0% | +$1,035 |
-| 4 | 4 | 36.27 | 100% | 0% | +$636 |
-| 8 | 2 | 23.58 | 100% | 0% | +$154 |
-| 9 | 5 | 47.71 | 100% | 0% | +$816 |
-| 10 | 4 | 19.05 | 75.0% | 25% | +$566 |
-| 12 | 7 | 51.28 | 100% | 0% | +$1,136 |
-| 13 | 2 | 45.66 | 100% | 0% | +$358 |
-| **14** | **16** | **−4.63** | **43.8%** | **25%** | **−$1,333** |
-| **15** | **3** | **−6.03** | **66.7%** | **33%** | **−$308** |
-| 22 | 7 | 40.70 | 100% | 0% | +$1,590 |
-
-Hours 14 and 15 UTC are persistently loss-making, with a 25–33% ITM rate more than double the full-sample average. Every other hour with three or more trades is profitable.
+| 0 | 1 | n/a | 0.0% | 100% | −\$856 |
+| 2 | 6 | 30.02 | 100% | 0% | +\$1,035 |
+| 4 | 4 | 36.27 | 100% | 0% | +\$636 |
+| 8 | 2 | 23.58 | 100% | 0% | +\$154 |
+| 9 | 5 | 47.71 | 100% | 0% | +\$816 |
+| 10 | 4 | 19.05 | 75.0% | 25% | +\$566 |
+| 12 | 7 | 51.28 | 100% | 0% | +\$1,136 |
+| 13 | 2 | 45.66 | 100% | 0% | +\$358 |
+| **14** | **16** | **−4.63** | **43.8%** | **25%** | **−\$1,333** |
+| **15** | **3** | **−6.03** | **66.7%** | **33%** | **−\$308** |
+| 22 | 7 | 40.70 | 100% | 0% | +\$1,590 |
 
 ### 7.2 Asia-Hours Only Strategy (31 trades, 61 days)
 
 | Metric | All Hours | Asia Only | Change |
 |--------|-----------|-----------|--------|
 | N Trades | 82 | 31 | −62% |
-| Total Return ($) | $5,960 | $3,248 | −46% |
+| Total Return | \$5,960 | \$3,248 | −46% |
 | Annualized Return | 53.06% | 51.5% | −1.6 pp |
 | **Sharpe Ratio** | **7.15** | **10.53** | **+47%** |
 | **Win Rate** | **79.3%** | **90.3%** | **+11 pp** |
-| **Max Drawdown ($)** | **−$3,318** | **−$761** | **−77%** |
+| **Max Drawdown** | **−\$3,318** | **−\$761** | **−77%** |
 | **Calmar Ratio** | **1.80** | **4.27** | **+137%** |
-| Avg P&L / Trade ($) | $72.68 | $104.77 | +44% |
-| Total TC ($) | −$4,292 | −$1,239 | −71% |
+| Avg P&L / Trade | \$72.68 | \$104.77 | +44% |
+| Total TC | −\$4,292 | −\$1,239 | −71% |
 | ITM Expiry Rate | 11.0% | 9.7% | −1.3 pp |
 
-The Asia-only strategy achieves near-identical annualized returns with 47% higher Sharpe and 77% lower drawdown. The key mechanism is trade selection: concentrating on the hours with the highest structural log-premiums reduces both losses and P&L volatility simultaneously.
+![Asia Hours Cumulative P&L](data/gold/plots/backtest_asia_hours_cumulative.png)
+
+*Figure 7.3: Cumulative P&L for the Asia-hours-only strategy (31 trades). The equity curve is notably smoother than the all-hours version, with a maximum drawdown of only −\$761 vs −\$3,318. The green shading on the total P&L line reflects the higher win rate (90.3%). Settlement losses (red dotted) are minimal, with only 3 ITM expiries across 31 trades.*
+
+The Asia-only strategy achieves near-identical annualized returns with 47% higher Sharpe and 77% lower drawdown. The key mechanism is trade selection: concentrating on hours with the highest structural log-premiums reduces both losses and P&L volatility simultaneously.
 
 **Walk-forward (Asia only):**
 
 | Period | Dates | Trades | Sharpe | Win Rate | Max DD |
 |--------|-------|--------|--------|----------|--------|
-| In-sample | Mar 21 – Apr 30 | 23 | 8.02 | 87.0% | −$761 |
-| Out-of-sample | May 1 – May 18 | 8 | 24.90 | 100% | $0 |
+| In-sample | Mar 21 – Apr 30 | 23 | 8.02 | 87.0% | −\$761 |
+| Out-of-sample | May 1 – May 18 | 8 | 24.90 | 100% | \$0 |
 
 **Top Asia hours by Sharpe:**
 
@@ -393,8 +433,6 @@ The Asia-only strategy achieves near-identical annualized returns with 47% highe
 | 8 | 17:00 JST / 16:00 HKT | 2 | 23.58 | 100% |
 | 10 | 19:00 JST / 18:00 HKT | 4 | 19.05 | 75.0% |
 
-Hours 4 and 9 UTC correspond to active Asian afternoon sessions (Tokyo early afternoon and Singapore close), when institutional crypto activity is elevated and IV may be bid up by hedging demand.
-
 ---
 
 ## 8. Robustness Tests
@@ -405,11 +443,15 @@ The annualized Sharpe ratio is computed as:
 
 $$\text{Sharpe}_{\text{ann}} = \frac{\bar{R}_d}{\hat{\sigma}_d} \times \sqrt{365}$$
 
-where $\bar{R}_d$ is the mean of daily aggregate P&L, $\hat{\sigma}_d$ is the sample standard deviation of daily P&L, and the risk-free rate is set to zero. The Asia-only Sharpe is higher despite similar returns because trade selection eliminates loss-making hours, substantially reducing daily P&L variance. Lower variance at constant mean return is the entire mechanism — not a higher return.
+where $$\bar{R}_d$$ is the mean of daily aggregate P&L, $$\hat{\sigma}_d$$ is the sample standard deviation of daily P&L, and the risk-free rate is set to zero. The Asia-only Sharpe is higher despite similar returns because trade selection eliminates loss-making hours, substantially reducing daily P&L variance. Lower variance at constant mean return is the entire mechanism — not a higher absolute return.
 
 ### 8.2 Walk-Forward Validation
 
 Strategy parameters are fixed from first principles (IV/RV filter threshold 1.20, minimum premium 10¢, early-exit trigger at 50%, target delta 25¢) and are not optimized on the training set. They are applied unchanged to the May hold-out.
+
+![Walk-Forward Comparison](data/gold/plots/walkforward_comparison.png)
+
+*Figure 8.1: Walk-forward cumulative P&L for all-hours (left) and Asia-only (right) strategies. Blue = in-sample (Mar–Apr), red dashed = out-of-sample (May). The vertical dotted line marks the May 1 train/test split. In both variants, the out-of-sample Sharpe exceeds the in-sample Sharpe (21.98 vs 4.42 all-hours; 24.90 vs 8.02 Asia-only), arguing strongly against overfitting.*
 
 Both strategies show superior out-of-sample performance relative to in-sample, arguing strongly against overfitting. The OOS Sharpes (21.98 all-hours, 24.90 Asia-only) likely reflect favorable market conditions in May rather than model edge improving out-of-sample, but the absence of performance decay is the key finding.
 
@@ -435,11 +477,15 @@ P95 Sharpe                    :  31.410
 % subsamples with Sharpe > 0  :  100.0%
 ```
 
-The bootstrap distributions confirm robustness. For all-hours, P5 Sharpe of 2.06 establishes that even the worst 5% of random subsamples are positive. For Asia-only, every single subsample is profitable. The Asia-only distribution dominates the all-hours distribution at every percentile, reinforcing the session filter as the preferred operating mode.
+![Bootstrap Sharpe Distribution](data/gold/plots/bootstrap_sharpe_distribution.png)
+
+*Figure 8.2: Bootstrap Sharpe distribution (1,000 iterations, 50% random subsamples). Left = all-hours, right = Asia-only. Vertical lines show the median (solid) and P5/P95 (dotted). The all-hours strategy has 99.8% profitable subsamples; the Asia-only strategy has 100%. The Asia-only distribution (green, median = 11.49) stochastically dominates the all-hours distribution (blue, median = 6.25) at every percentile.*
+
+The bootstrap distributions confirm robustness. For all-hours, P5 Sharpe of 2.06 establishes that even the worst 5% of random subsamples are positive. For Asia-only, every single subsample is profitable, providing the strongest possible bootstrap evidence that performance is not driven by outliers or lucky sequences.
 
 ### 8.4 Per-Hour Cross-Validation
 
-The per-hour performance breakdown constitutes a natural cross-validation: if the edge were concentrated in a few lucky hours, removing them would collapse total returns. In practice, the strategy is profitable across almost all hours, with two consistent exceptions (hours 14 and 15) that are loss-making across both backtests and both halves of the walk-forward. Consistency across non-overlapping sub-periods is evidence of a structural issue rather than noise.
+The per-hour performance breakdown constitutes a natural cross-validation: if the edge were concentrated in a few lucky hours, removing them would collapse total returns. In practice, the strategy is profitable across almost all hours, with two consistent exceptions (hours 14 and 15) that are loss-making across both backtests and both halves of the walk-forward split. Consistency across non-overlapping sub-periods is evidence of a structural issue rather than noise.
 
 ---
 
@@ -458,7 +504,7 @@ The May walk-forward hold-out contains only 8 trades (Asia-only) and 18 trades (
 ### 9.3 Execution Assumptions
 
 - **Perfect 5-minute rebalancing.** Real Kalshi API rate limits and BTC exchange latency could prevent simultaneous option and BTC leg execution.
-- **Fixed slippage.** The 100 bps premium slippage assumption is optimistic relative to actual Kalshi bid-ask spreads of 3–5 cents (600–1,000 bps of price) even at $250 notional.
+- **Fixed slippage.** The 100 bps premium slippage assumption is optimistic relative to actual Kalshi bid-ask spreads of 3–5 cents (600–1,000 bps of price) even at \$250 notional.
 - **BTC liquidity.** The 1 bps BTC rebalance cost is appropriate at the modeled sizes; scaling up Kalshi exposure while keeping BTC costs constant is not possible.
 
 ### 9.4 Hours 14–15 UTC Anomaly
@@ -469,11 +515,11 @@ Hours 14 and 15 UTC show consistent losses across both backtests and both halves
 
 | Notional per Trade | Contracts | Market Impact Assessment |
 |-------------------|-----------|--------------------------|
-| $250 | 1,000 | Modeled — marginally achievable |
-| $1,000 | 4,000 | Likely 1–2 cent adverse price impact |
-| $5,000+ | 20,000+ | Cannot execute near modeled price |
+| \$250 | 1,000 | Modeled — marginally achievable |
+| \$1,000 | 4,000 | Likely 1–2 cent adverse price impact |
+| \$5,000+ | 20,000+ | Cannot execute near modeled price |
 
-The practical AUM ceiling is approximately **$50,000–$100,000** based on 1% position sizing at $500 notional per trade. The Asia-only strategy generates ~0.5 trades per day on average, meaning capital is idle >50% of the time and the effective portfolio-level annualized return is substantially below the 51.5% reported on active capital.
+The practical AUM ceiling is approximately **\$50,000–\$100,000** based on 1% position sizing at \$500 notional per trade. The Asia-only strategy generates ~0.5 trades per day on average, meaning capital is idle >50% of the time and the effective portfolio-level annualized return is substantially below the 51.5% reported on active capital.
 
 ### 9.6 Model Risk
 
@@ -491,9 +537,9 @@ The Asia-only filter generates approximately one trade every two days. Idle capi
 
 **Q2: Log(IV) and log(RV) share a stable long-run relationship, but the premium is structurally heterogeneous across UTC hours.** Both log series are stationary (ADF p < 0.003), and the Engle-Granger test confirms a long-run co-movement relationship (p = 0.006) with stationary OLS residuals. The mean log-spread of +0.43 (implying IV/RV = 1.54× on average) is the cleanest summary of the average vol markup. F-tests and likelihood-ratio tests comparing pooled and per-hour cointegration models both reject the pooled specification at F(46, 1371) = 3.081, p = 5.62×10⁻¹¹, confirming structural heterogeneity. Asia session hours (01:00–10:59 UTC) show the most distinct dynamics; hours 14–15 UTC are persistently unfavorable.
 
-**Q3: The premium is extractable, and the Asia session filter substantially improves risk-adjusted performance.** A vanilla short-volatility strategy — selling 1,000 +25Δ OTM binary calls near 25 cents with 5-minute BTC delta hedging and a 50% early-exit rule — achieves a Sharpe ratio of 7.15 over the full 61-day sample (53.06% annualized return, $5,960 total P&L). Restricting to the Asia session improves the Sharpe to 10.53, reduces maximum drawdown by 77%, and raises the win rate to 90.3%, while delivering near-identical annualized returns. Bootstrap validation shows 99.8% (all hours) and 100% (Asia only) of random 50% trade subsamples are profitable. Walk-forward validation shows out-of-sample May performance exceeds in-sample performance in both variants.
+**Q3: The premium is extractable, and the Asia session filter substantially improves risk-adjusted performance.** A vanilla short-volatility strategy — selling 1,000 +25Δ OTM binary calls near 25 cents with 5-minute BTC delta hedging and a 50% early-exit rule — achieves a Sharpe ratio of 7.15 over the full 61-day sample (53.06% annualized return, \$5,960 total P&L). Restricting to the Asia session improves the Sharpe to 10.53, reduces maximum drawdown by 77%, and raises the win rate to 90.3%, while delivering near-identical annualized returns. Bootstrap validation shows 99.8% (all hours) and 100% (Asia only) of random 50% trade subsamples are profitable. Walk-forward validation shows out-of-sample May performance exceeds in-sample performance in both variants.
 
-**The binding constraint is market capacity.** At $250 notional per trade, the strategy operates near the practical limit of Kalshi's order book liquidity. The practical AUM ceiling is approximately $50,000–$100,000 before market impact materially erodes the edge. The strategy represents a real but inherently small-scale opportunity — a structural alpha that cannot easily be arbitraged away by institutional capital precisely because the market cannot absorb institutional-sized positions.
+**The binding constraint is market capacity.** At \$250 notional per trade, the strategy operates near the practical limit of Kalshi's order book liquidity. The practical AUM ceiling is approximately \$50,000–\$100,000 before market impact materially erodes the edge. The strategy represents a real but inherently small-scale opportunity — a structural alpha that cannot easily be arbitraged away by institutional capital precisely because the market cannot absorb institutional-sized positions.
 
 ---
 
@@ -532,11 +578,11 @@ The Asia-only filter generates approximately one trade every two days. Idle capi
 | LR test (Q3) | χ²(46) = 139.58, p = 2.31 × 10⁻¹¹ |
 | All-hours Sharpe | 7.15 |
 | All-hours win rate | 79.3% |
-| All-hours max drawdown | −$3,318 |
+| All-hours max drawdown | −\$3,318 |
 | All-hours bootstrap P5 Sharpe | 2.06 |
 | Asia-hours Sharpe | 10.53 |
 | Asia-hours win rate | 90.3% |
-| Asia-hours max drawdown | −$761 |
+| Asia-hours max drawdown | −\$761 |
 | Asia-hours bootstrap P5 Sharpe | 3.99 |
 
 ## Appendix B: Data Pipeline Summary
@@ -569,6 +615,22 @@ Kalshi API (RSA-PSS auth)          Binance 1m BTCUSDT
                backtest_01_all_hours.ipynb     All-hours strategy
                backtest_02_asia_hours.ipynb    Asia session strategy
 ```
+
+## Appendix C: Figure Index
+
+| Figure | File | Section |
+|--------|------|---------|
+| 3.1 Intraday vol smile at T0 | `data/gold/plots/vol_surface_intraday_T0.png` | §3.3 |
+| 3.2 Vol surface across sessions | `data/gold/plots/vol_surface_cross_session.png` | §3.3 |
+| 5.1 Q1 vol premium panel | `data/gold/plots/q1_vol_premium_panel.png` | §5.1 |
+| 5.6 Q2 cointegration panel | `data/gold/plots/q2_cointegration_panel.png` | §5.2 |
+| 5.7 Q3 per-hour intercepts | `data/gold/plots/q3_per_hour_intercepts.png` | §5.3 |
+| 5.8 ATM IV across snapshots | `data/gold/plots/atm_iv_boxplot.png` | §5.3 |
+| 5.9 25Δ skew across snapshots | `data/gold/plots/skew_25d_boxplot.png` | §5.3 |
+| 7.1 All-hours cumulative P&L | `data/gold/plots/backtest_all_hours_cumulative.png` | §7.1 |
+| 7.3 Asia-hours cumulative P&L | `data/gold/plots/backtest_asia_hours_cumulative.png` | §7.2 |
+| 8.1 Walk-forward comparison | `data/gold/plots/walkforward_comparison.png` | §8.2 |
+| 8.2 Bootstrap Sharpe distribution | `data/gold/plots/bootstrap_sharpe_distribution.png` | §8.3 |
 
 ---
 
