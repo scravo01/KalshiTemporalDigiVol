@@ -91,8 +91,6 @@ src/
 │   │   └── implied_vol.py   invert_iv() closed-form + brentq fallback
 │   └── gold/
 │       └── gold_etl.py      run() — features, stats, plots
-└── ui/
-    └── app.py               Streamlit dashboard
 ```
 
 ## Key Technology Choices
@@ -131,5 +129,4 @@ Both are loaded from `.env` via `python-dotenv` in `cli/main.py:main()`.
 ## Known Limitations
 
 - `vol_surface_etl.py` (`VolSurfaceETL`) is not wired into the CLI or `pipeline` command — it must be invoked manually.
-- The Streamlit UI's `_SNAPSHOT_ORDER` is hardcoded to `["T-1", "T0", "T+1"]` (three snapshots), while the silver layer now covers all 24 windows; the UI will silently filter down to those three.
 - Gold ETL hardcodes `IV_MIN = 0.20` and `IV_MAX = 5.00` as IV sanity bounds.

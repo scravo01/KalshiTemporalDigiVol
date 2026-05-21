@@ -25,7 +25,6 @@ dependencies = [
     "plotly>=5.24.0",
     "seaborn>=0.13.2",
     "statsmodels>=0.14.0",
-    "streamlit>=1.57.0",
     "tqdm>=4.67.3",
     "apache-airflow>=3.2.1",
 ]

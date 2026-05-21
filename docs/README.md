@@ -39,12 +39,6 @@ Reference documentation for the KalshiTemporalDigiVol research pipeline.
 |----------|-------------|
 | [implied_vol.md](implied_vol.md) | Digital Black-Scholes inversion derivation, quadratic-in-u closed form, ITM/OTM/ATM root selection rules, edge cases, `invert_iv` API |
 
-## UI
-
-| Document | Description |
-|----------|-------------|
-| [ui.md](ui.md) | Streamlit dashboard sections, sidebar filters, cached data loaders, launch instructions |
-
 ## Data Reference
 
 | Document | Description |
@@ -67,7 +61,7 @@ KALSHI_API_KEY="-----BEGIN RSA PRIVATE KEY-----..."
 uv run kvol pipeline --start-date 2026-03-21 --end-date 2026-05-18
 
 # 4. Launch dashboard
-uv run streamlit run src/ui/app.py
+uv run kvol rv-iv
 ```
 
 ## Key Architectural Invariants

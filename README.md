@@ -210,8 +210,6 @@ uv run kvol rv-iv          # RV vs IV premium → rv_iv.parquet, rv_iv_hourly.pa
 # All stages in one command
 uv run kvol pipeline --start-date 2026-03-21 --end-date 2026-05-18
 
-# Dashboard
-uv run streamlit run src/ui/app.py
 ```
 
 ---
@@ -277,7 +275,6 @@ src/
     gold/            # Statistical analysis + RV-IV comparison
   cli/main.py        # Click CLI: bronze-kalshi, bronze-binance, silver,
                      #            vol-surface, gold, rv-iv, pipeline
-  ui/app.py          # Streamlit dashboard
 dags/
   kalshi_etl_dag.py  # Airflow DAG (daily, 22:30 UTC)
 data/

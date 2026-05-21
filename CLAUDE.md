@@ -26,9 +26,6 @@ uv run pytest tests/ -v
 
 # Run a single test file
 uv run pytest tests/test_implied_vol.py -v
-
-# Launch the Streamlit UI (after pipeline has run)
-uv run streamlit run src/ui/app.py
 ```
 
 The `.gitignore` includes `.ruff_cache/`, so Ruff is the intended linter when added.
